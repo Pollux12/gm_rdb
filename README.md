@@ -8,7 +8,7 @@ Provides Lua debugging (using [LRDB](https://github.com/satoren/vscode-lrdb)) an
 
 ## Compiling
 
-The only supported compilation platform for this project on Windows is **Visual Studio 2017**. However, it's possible it'll work with *Visual Studio 2015* and *Visual Studio 2019* because of the unified runtime.
+The CMake build used in this repository is validated in CI with modern Visual Studio toolchains (currently VS2022 on `windows-latest`) and Ubuntu/macOS runners.
 
 On Linux, everything should work fine as is.
 

@@ -36,7 +36,7 @@ endif()
 project(gm_rdb 
     VERSION 1.0.0
     LANGUAGES C CXX
-    HOMEPAGE_URL "https://github.com/Pika-Software/gmsv_async_postgres"
+    HOMEPAGE_URL "https://github.com/Pollux12/emmylua-rust/tree/master/gm_rdb"
 )
 
 # Enable -fPIC flag

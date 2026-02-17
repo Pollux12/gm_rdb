@@ -66,17 +66,17 @@ jobs:
         run: cmake --build build -j -t rdb --config ${{env.BUILD_TYPE}}
 
       - name: Configure project for client
-        run: cmake -B build -DCLIENT_DLL=1
+        run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build-client -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}" -DCLIENT_DLL=1
 
       - name: Build project f0r client
-        run: cmake --build build -j -t rdb --config ${{env.BUILD_TYPE}}
+        run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
 
       - name: Strip debug information from binaries and keep them outside (Ubuntu)
         if: ${{ startsWith(matrix.os, 'ubuntu-') }}
         run: |
-          find *.dll -exec objcopy --only-keep-debug {} {}.pdb \;
-          find *.dll -exec objcopy --strip-debug {} \;
-          find *.dll -exec objcopy --add-gnu-debuglink {}.pdb {} \;
+          find . -name '*.dll' -exec objcopy --only-keep-debug {} {}.pdb \;
+          find . -name '*.dll' -exec objcopy --strip-debug {} \;
+          find . -name '*.dll' -exec objcopy --add-gnu-debuglink {}.pdb {} \;
 
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v4
