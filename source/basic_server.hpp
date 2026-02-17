@@ -6,8 +6,14 @@
 
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cmath>
+#include <exception>
+#include <limits>
 #include <map>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -51,6 +57,9 @@ class basic_server {
   template <typename... StreamArgs>
   basic_server(StreamArgs&&... arg)
       : wait_for_connect_(true),
+        attached_(false),
+        disposed_(false),
+        has_active_connection_(false),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
   }
@@ -60,9 +69,14 @@ class basic_server {
   /// @brief attach (or detach) for debug target
   /// @param lua_State*  debug target
   void reset(lua_State* L = nullptr) {
+    attached_ = L != nullptr;
+    disposed_ = false;
     debugger_.reset(L);
     if (!L) {
-      exit();
+      wait_for_connect_ = true;
+      debugger_.unpause();
+      console_adapter_.set_callback(nullptr);
+      command_stream_.reconnect();
     } else {
       console_adapter_.set_callback(std::bind(&basic_server<StreamType>::send_output, this, std::placeholders::_1));
     }
@@ -70,9 +84,19 @@ class basic_server {
 
   /// @brief Exit debug server
   void exit() {
-    send_notify(lrdb::notify_message("exit"));
-    command_stream_.close();
+    if (disposed_) {
+      return;
+    }
+    disposed_ = true;
+    attached_ = false;
+    wait_for_connect_ = true;
     console_adapter_.set_callback(nullptr);
+    debugger_.reset(nullptr);
+    debugger_.unpause();
+    if (command_stream_.is_open()) {
+      send_notify(lrdb::notify_message("exit"));
+    }
+    command_stream_.close();
   }
 
   StreamType& command_stream() { return command_stream_; };
@@ -80,6 +104,9 @@ class basic_server {
  private:
   void init() {
     debugger_.set_pause_handler([&](lrdb::debugger&) {
+      if (disposed_) {
+        return;
+      }
       send_pause_status();
       while (debugger_.paused() && command_stream_.is_open()) {
         command_stream_.run_one();
@@ -88,21 +115,31 @@ class basic_server {
     });
 
     debugger_.set_tick_handler([&](lrdb::debugger&) {
+      if (disposed_) {
+        return;
+      }
       if (wait_for_connect_) {
-        command_stream_.wait_for_connection();
+        if (!wait_for_connection_with_timeout()) {
+          ++metrics_.connection_wait_timeouts;
+          return;
+        }
       }
       command_stream_.poll();
     });
 
-    command_stream_.on_connection = [=]() { connected_done(); };
-    command_stream_.on_data = [=](const std::string& data) {
+    command_stream_.on_connection = [this]() { connected_done(); };
+    command_stream_.on_data = [this](const std::string& data) {
       execute_message(data);
     };
-    command_stream_.on_close = [=]() {
-      ++metrics_.connections_closed;
+    command_stream_.on_close = [this]() {
+      if (has_active_connection_) {
+        ++metrics_.connections_closed;
+      }
+      has_active_connection_ = false;
+      wait_for_connect_ = true;
       debugger_.unpause();
     };
-    command_stream_.on_error = [=](const std::string&) { ++metrics_.stream_errors; };
+    command_stream_.on_error = [this](const std::string&) { ++metrics_.stream_errors; };
   }
   void send_pause_status() {
     json::object pauseparam;
@@ -110,7 +147,12 @@ class basic_server {
     send_notify(lrdb::notify_message("paused", json::value(pauseparam)));
   }
   void connected_done() {
+    if (disposed_) {
+      command_stream_.close();
+      return;
+    }
     wait_for_connect_ = false;
+    has_active_connection_ = true;
     ++metrics_.connections_opened;
     json::object param;
     param["protocol_version"] = json::value(LRDB_SERVER_PROTOCOL_VERSION);
@@ -125,6 +167,9 @@ class basic_server {
   }
 
   bool send_message(const std::string& message) {
+    if (disposed_) {
+      return false;
+    }
     bool sent = command_stream_.send_message(message);
     if (!sent) {
       ++metrics_.send_failures;
@@ -136,15 +181,22 @@ class basic_server {
     std::string err = json::parse(msg, message);
     if (!err.empty()) {
       ++metrics_.parse_errors;
+      send_protocol_error(lrdb::response_error::ParseError, "parse error",
+                          json::value(), "parse",
+                          error_data("parse", "message", err));
       return;
     }
     if (!lrdb::message::is_request(msg)) {
       ++metrics_.invalid_requests;
+      send_protocol_error(lrdb::response_error::InvalidRequest, "invalid request",
+                          lrdb::message::get_id(msg), "request");
       return;
     }
     lrdb::request_message request;
     if (!lrdb::message::parse(msg, request)) {
       ++metrics_.invalid_requests;
+      send_protocol_error(lrdb::response_error::InvalidRequest, "invalid request",
+                          lrdb::message::get_id(msg), "request");
       return;
     }
     execute_request(request);
@@ -153,6 +205,22 @@ class basic_server {
   bool send_notify(const lrdb::notify_message& message) {
     ++metrics_.notifications_sent;
     return send_message(lrdb::message::serialize(message));
+  }
+
+  bool wait_for_connection_with_timeout() {
+    const auto start = std::chrono::steady_clock::now();
+    while (wait_for_connect_ && !command_stream_.is_open()) {
+      command_stream_.poll();
+      if (command_stream_.is_open()) {
+        return true;
+      }
+      if (std::chrono::steady_clock::now() - start >=
+          std::chrono::milliseconds(kConnectionWaitTimeoutMs)) {
+        return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return command_stream_.is_open();
   }
   bool send_response(lrdb::response_message& message) {
     if (message.error) {
@@ -173,38 +241,167 @@ class basic_server {
     ++metrics_.responses_sent;
     return send_message(lrdb::message::serialize(message));
   }
+
+  static json::value error_data(const std::string& phase,
+                                const std::string& category,
+                                const std::string& detail = std::string()) {
+    json::object data;
+    data["phase"] = json::value(phase);
+    data["category"] = json::value(category);
+    if (!detail.empty()) {
+      data["detail"] = json::value(detail);
+    }
+    return json::value(data);
+  }
+
+  void set_structured_error(lrdb::response_message& response, int code,
+                            const std::string& message,
+                            const std::string& method,
+                            const json::value& detail = json::value()) {
+    response.error = lrdb::response_error(code, message);
+    json::object data = {
+        {"phase", json::value("phase1")},
+        {"method", method.empty() ? json::value() : json::value(method)}};
+    if (!detail.is<json::null>()) {
+      data["detail"] = detail;
+    }
+    response.error->data = json::value(data);
+  }
+
+  bool send_protocol_error(int code, const std::string& message,
+                           const json::value& id, const std::string& method,
+                           const json::value& detail = json::value()) {
+    lrdb::response_message response;
+    response.id = id;
+    set_structured_error(response, code, message, method, detail);
+    return send_response(response);
+  }
+
+  bool try_parse_non_negative_int(const json::value& value, int& out) {
+    if (!value.is<double>()) {
+      return false;
+    }
+    const double number = value.get<double>();
+    if (!std::isfinite(number) || number < 0.0 ||
+        number > static_cast<double>(std::numeric_limits<int>::max())) {
+      return false;
+    }
+    out = static_cast<int>(number);
+    return static_cast<double>(out) == number;
+  }
+
+  bool try_parse_depth(const json::value& param, int& depth) {
+    if (!param.is<json::object>() || !param.contains("depth")) {
+      depth = 1;
+      return true;
+    }
+    if (!try_parse_non_negative_int(param.get("depth"), depth)) {
+      return false;
+    }
+    if (depth > kMaxObjectDepth) {
+      depth = kMaxObjectDepth;
+    }
+    return true;
+  }
+
+  bool try_parse_stack_no(const json::value& param, int& stack_no) {
+    if (!param.is<json::object>() || !param.contains("stack_no")) {
+      return false;
+    }
+    return try_parse_non_negative_int(param.get("stack_no"), stack_no);
+  }
+
+  bool ensure_attached(lrdb::response_message& response, const std::string& method) {
+    if (attached_ && !disposed_) {
+      return true;
+    }
+    set_structured_error(response, lrdb::response_error::ServerNotInitialized,
+                         "debug session not attached", method,
+                         error_data("session", "state", "detached"));
+    return false;
+  }
+
+  bool ensure_paused(lrdb::response_message& response, const std::string& method) {
+    if (debugger_.paused()) {
+      return true;
+    }
+    set_structured_error(response, lrdb::response_error::InvalidRequest,
+                         "debugger is not paused", method,
+                         error_data("request", "state", "running"));
+    return false;
+  }
+
+  bool extract_frame(lrdb::response_message& response, const std::string& method,
+                     const json::value& param, int& stack_no, int& depth,
+                     std::vector<lrdb::stack_info>& callstack) {
+    if (!ensure_attached(response, method) || !ensure_paused(response, method)) {
+      return false;
+    }
+    if (!param.is<json::object>() || !try_parse_stack_no(param, stack_no) ||
+        !try_parse_depth(param, depth)) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", method,
+                           error_data("request", "params"));
+      return false;
+    }
+    callstack = debugger_.get_call_stack();
+    if (stack_no >= static_cast<int>(callstack.size())) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid stack frame", method,
+                           error_data("request", "stack_no"));
+      return false;
+    }
+    return true;
+  }
   bool step_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "step")) {
+      return send_response(response);
+    }
     debugger_.step();
     return send_response(response);
   }
 
   bool step_in_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "step_in")) {
+      return send_response(response);
+    }
     debugger_.step_in();
     return send_response(response);
   }
   bool step_out_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "step_out")) {
+      return send_response(response);
+    }
     debugger_.step_out();
     return send_response(response);
   }
   bool continue_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "continue")) {
+      return send_response(response);
+    }
     debugger_.unpause();
     return send_response(response);
   }
   bool pause_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "pause")) {
+      return send_response(response);
+    }
     debugger_.pause();
     return send_response(response);
   }
   bool add_breakpoint_request(lrdb::response_message& response,
                               const json::value& param) {
+    if (!ensure_attached(response, "add_breakpoint")) {
+      return send_response(response);
+    }
     bool has_source = param.get("file").is<std::string>();
     bool has_condition = param.get("condition").is<std::string>();
     bool has_hit_condition = param.get("hit_condition").is<std::string>();
-    bool has_line = param.get("line").is<double>();
-    if (has_source && has_line) {
+    int line = -1;
+    bool has_line = try_parse_non_negative_int(param.get("line"), line);
+    if (has_source && has_line && line > 0) {
       std::string source =
           param.get<json::object>().at("file").get<std::string>();
-      int line =
-          static_cast<int>(param.get<json::object>().at("line").get<double>());
 
       std::string condition;
       std::string hit_condition;
@@ -219,16 +416,33 @@ class basic_server {
       debugger_.add_breakpoint(source, line, condition, hit_condition);
 
     } else {
-      response.error =
-          lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "add_breakpoint",
+                           error_data("request", "params"));
     }
     return send_response(response);
   }
 
   bool clear_breakpoints_request(lrdb::response_message& response,
                                  const json::value& param) {
+    if (!ensure_attached(response, "clear_breakpoints")) {
+      return send_response(response);
+    }
+    if (!param.is<json::object>() && !param.is<json::null>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "clear_breakpoints",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
     bool has_source = param.get("file").is<std::string>();
-    bool has_line = param.get("line").is<double>();
+    int line = -1;
+    bool has_line = try_parse_non_negative_int(param.get("line"), line);
+    if (param.is<json::object>() && param.contains("line") && !has_line) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "clear_breakpoints",
+                           error_data("request", "line"));
+      return send_response(response);
+    }
     if (!has_source) {
       debugger_.clear_breakpoints();
     } else {
@@ -237,8 +451,6 @@ class basic_server {
       if (!has_line) {
         debugger_.clear_breakpoints(source);
       } else {
-        int line = static_cast<int>(
-            param.get<json::object>().at("line").get<double>());
         debugger_.clear_breakpoints(source, line);
       }
     }
@@ -247,6 +459,9 @@ class basic_server {
   }
 
   bool get_breakpoints_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "get_breakpoints")) {
+      return send_response(response);
+    }
     const lrdb::debugger::line_breakpoint_type& breakpoints =
         debugger_.line_breakpoints();
 
@@ -271,6 +486,10 @@ class basic_server {
   }
 
   bool get_stacktrace_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "get_stacktrace") ||
+        !ensure_paused(response, "get_stacktrace")) {
+      return send_response(response);
+    }
     auto callstack = debugger_.get_call_stack();
     json::array res;
     for (auto& s : callstack) {
@@ -303,71 +522,60 @@ class basic_server {
 
   bool get_local_variable_request(lrdb::response_message& response,
                                   const json::value& param) {
-    if (!param.is<json::object>()) {
-      response.error =
-          lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
-
+    int stack_no = 0;
+    int depth = 1;
+    std::vector<lrdb::stack_info> callstack;
+    if (!extract_frame(response, "get_local_variable", param, stack_no, depth,
+                       callstack)) {
       return send_response(response);
     }
-    bool has_stackno = param.get("stack_no").is<double>();
-    int depth = param.get("depth").is<double>()
-                    ? static_cast<int>(param.get("depth").get<double>())
-                    : 1;
-    if (has_stackno) {
-      int stack_no = static_cast<int>(param.get("stack_no").get<double>());
-      auto callstack = debugger_.get_call_stack();
-      if (int(callstack.size()) > stack_no) {
-        auto localvar = callstack[stack_no].get_local_vars(depth);
-        json::object obj;
-        for (auto& var : localvar) {
-          obj[var.first] = var.second;
-        }
-        response.result = json::value(obj);
-        return send_response(response);
-      }
+    auto localvar = callstack[stack_no].get_local_vars(depth);
+    json::object obj;
+    for (auto& var : localvar) {
+      obj[var.first] = var.second;
     }
-    response.error =
-        lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
-
+    response.result = json::value(obj);
     return send_response(response);
   }
 
   bool get_upvalues_request(lrdb::response_message& response,
                             const json::value& param) {
-    if (!param.is<json::object>()) {
-      response.error =
-          lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
-
+    int stack_no = 0;
+    int depth = 1;
+    std::vector<lrdb::stack_info> callstack;
+    if (!extract_frame(response, "get_upvalues", param, stack_no, depth,
+                       callstack)) {
       return send_response(response);
     }
-    bool has_stackno = param.get("stack_no").is<double>();
-    int depth = param.get("depth").is<double>()
-                    ? static_cast<int>(param.get("depth").get<double>())
-                    : 1;
-    if (has_stackno) {
-      int stack_no = static_cast<int>(
-          param.get<json::object>().at("stack_no").get<double>());
-      auto callstack = debugger_.get_call_stack();
-      if (int(callstack.size()) > stack_no) {
-        auto localvar = callstack[stack_no].get_upvalues(depth);
-        json::object obj;
-        for (auto& var : localvar) {
-          obj[var.first] = var.second;
-        }
-
-        response.result = json::value(obj);
-
-        return send_response(response);
-      }
+    auto localvar = callstack[stack_no].get_upvalues(depth);
+    json::object obj;
+    for (auto& var : localvar) {
+      obj[var.first] = var.second;
     }
-    response.error =
-        lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
-
+    response.result = json::value(obj);
     return send_response(response);
   }
   bool eval_request(lrdb::response_message& response, const json::value& param) {
+    int stack_no = 0;
+    int depth = 1;
+    std::vector<lrdb::stack_info> callstack;
+    if (!extract_frame(response, "eval", param, stack_no, depth, callstack)) {
+      return send_response(response);
+    }
     bool has_chunk = param.get("chunk").is<std::string>();
-    bool has_stackno = param.get("stack_no").is<double>();
+    if (!has_chunk) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "eval",
+                           error_data("request", "chunk"));
+      return send_response(response);
+    }
+    std::string chunk = param.get<json::object>().at("chunk").get<std::string>();
+    if (chunk.size() > kMaxEvalChunkBytes) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "eval chunk exceeds limit", "eval",
+                           error_data("request", "chunk_size"));
+      return send_response(response);
+    }
 
     bool use_global =
         !param.get("global").is<bool>() || param.get("global").get<bool>();
@@ -376,42 +584,30 @@ class basic_server {
     bool use_local =
         !param.get("local").is<bool>() || param.get("local").get<bool>();
 
-    int depth = param.get("depth").is<double>()
-                    ? static_cast<int>(param.get("depth").get<double>())
-                    : 1;
-
-    if (has_chunk && has_stackno) {
-      std::string chunk =
-          param.get<json::object>().at("chunk").get<std::string>();
-      int stack_no = static_cast<int>(
-          param.get<json::object>().at("stack_no").get<double>());
-      auto callstack = debugger_.get_call_stack();
-      if (int(callstack.size()) > stack_no) {
-        std::string error;
-        json::value ret = json::value(
-            callstack[stack_no].eval(chunk.c_str(), error, use_global,
-                                     use_upvalue, use_local, depth + 1));
-        if (error.empty()) {
-          response.result = ret;
-
-          return send_response(response);
-        } else {
-          response.error = lrdb::response_error(lrdb::response_error::InvalidParams, error);
-
-          return send_response(response);
-        }
-      }
+    std::string error;
+    json::value ret = json::value(callstack[stack_no].eval(
+        chunk.c_str(), error, use_global, use_upvalue, use_local, depth + 1));
+    if (error.empty()) {
+      response.result = ret;
+    } else {
+      set_structured_error(response, lrdb::response_error::InvalidParams, error,
+                           "eval", error_data("request", "runtime"));
     }
-    response.error =
-        lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
-
     return send_response(response);
   }
   bool get_global_request(lrdb::response_message& response,
                           const json::value& param) {
-    int depth = param.get("depth").is<double>()
-                    ? static_cast<int>(param.get("depth").get<double>())
-                    : 1;
+    if (!ensure_attached(response, "get_global") ||
+        !ensure_paused(response, "get_global")) {
+      return send_response(response);
+    }
+    int depth = 1;
+    if (!try_parse_depth(param, depth)) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_global",
+                           error_data("request", "depth"));
+      return send_response(response);
+    }
     response.result =
         debugger_.get_global_table(depth + 1);  //+ 1 is global table self
 
@@ -453,14 +649,20 @@ class basic_server {
         json::value(static_cast<double>(metrics_.stream_errors.load()));
     metrics["send_failures"] =
         json::value(static_cast<double>(metrics_.send_failures.load()));
+    metrics["connection_wait_timeouts"] =
+        json::value(static_cast<double>(metrics_.connection_wait_timeouts.load()));
     return json::value(metrics);
   }
 
   bool command_request(lrdb::response_message& response,
-                          const json::value& param) {
-    if (!param.is<std::string>()) {
-      response.error =
-          lrdb::response_error(lrdb::response_error::InvalidParams, "invalid params");
+                           const json::value& param) {
+    if (!ensure_attached(response, "command")) {
+      return send_response(response);
+    }
+    if (!param.is<std::string>() || param.get<std::string>().empty()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "command",
+                           error_data("request", "params"));
       return send_response(response);
     }
     console_adapter_.run_command( param.get<std::string>() );
@@ -494,16 +696,43 @@ class basic_server {
 
     lrdb::response_message response;
     response.id = req.id;
+    if (disposed_) {
+      set_structured_error(response, lrdb::response_error::ServerNotInitialized,
+                           "server is disposed", req.method,
+                           error_data("session", "state", "disposed"));
+      send_response(response);
+      return;
+    }
     auto match = cmd_map.find(req.method);
     if (match != cmd_map.end()) {
-      (this->*(match->second))(response, req.params);
+      try {
+        (this->*(match->second))(response, req.params);
+      } catch (const std::exception& ex) {
+        set_structured_error(response, lrdb::response_error::InternalError,
+                             "internal server error", req.method,
+                             error_data("request", "exception", ex.what()));
+        send_response(response);
+      } catch (...) {
+        set_structured_error(response, lrdb::response_error::InternalError,
+                             "internal server error", req.method,
+                             error_data("request", "exception"));
+        send_response(response);
+      }
     } else {
-      response.error = lrdb::response_error(lrdb::response_error::MethodNotFound,
-                                      "method not found : " + req.method);
+      set_structured_error(response, lrdb::response_error::MethodNotFound,
+                           "method not found : " + req.method, req.method,
+                           error_data("request", "method"));
       send_response(response);
     }
   }
+  static constexpr int kConnectionWaitTimeoutMs = 100;
+  static constexpr int kMaxObjectDepth = 8;
+  static constexpr size_t kMaxEvalChunkBytes = 16 * 1024;
+
   bool wait_for_connect_;
+  bool attached_;
+  bool disposed_;
+  bool has_active_connection_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};
     std::atomic<uint64_t> connections_closed{0};
@@ -517,6 +746,7 @@ class basic_server {
     std::atomic<uint64_t> internal_errors{0};
     std::atomic<uint64_t> stream_errors{0};
     std::atomic<uint64_t> send_failures{0};
+    std::atomic<uint64_t> connection_wait_timeouts{0};
   } metrics_;
   lrdb::debugger debugger_;
   StreamType command_stream_;
