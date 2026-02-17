@@ -389,6 +389,13 @@ class basic_server {
     debugger_.pause();
     return send_response(response);
   }
+  bool pause_now_request(lrdb::response_message& response, const json::value&) {
+    if (!ensure_attached(response, "pause_now")) {
+      return send_response(response);
+    }
+    debugger_.pause_now();
+    return send_response(response);
+  }
   bool add_breakpoint_request(lrdb::response_message& response,
                               const json::value& param) {
     if (!ensure_attached(response, "add_breakpoint")) {
@@ -681,6 +688,7 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(step_out),
         LRDB_DEBUG_COMMAND_TABLE(continue),
         LRDB_DEBUG_COMMAND_TABLE(pause),
+        LRDB_DEBUG_COMMAND_TABLE(pause_now),
         LRDB_DEBUG_COMMAND_TABLE(add_breakpoint),
         LRDB_DEBUG_COMMAND_TABLE(get_breakpoints),
         LRDB_DEBUG_COMMAND_TABLE(clear_breakpoints),
