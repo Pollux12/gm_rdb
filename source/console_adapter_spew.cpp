@@ -120,6 +120,7 @@ SpewRetval_t console_adapter::Log( SpewType_t spewType, const tchar *pMsg )
 	jcolor["a"] = json::value( static_cast<double>( color.a( ) ) );
 
 	json::object param;
+	param["channel_id"] = json::value( static_cast<double>( spewType ) );
 	param["group"] = json::value( GetSpewOutputGroup( ) );
 	param["severity"] = json::value( static_cast<double>( GetSpewOutputLevel( ) ) );
 	param["color"] = json::value( jcolor );
