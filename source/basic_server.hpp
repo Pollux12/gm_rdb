@@ -5,6 +5,9 @@
 #endif
 
 #include <memory>
+#include <atomic>
+#include <cstdint>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -95,7 +98,11 @@ class basic_server {
     command_stream_.on_data = [=](const std::string& data) {
       execute_message(data);
     };
-    command_stream_.on_close = [=]() { debugger_.unpause(); };
+    command_stream_.on_close = [=]() {
+      ++metrics_.connections_closed;
+      debugger_.unpause();
+    };
+    command_stream_.on_error = [=](const std::string&) { ++metrics_.stream_errors; };
   }
   void send_pause_status() {
     json::object pauseparam;
@@ -104,6 +111,7 @@ class basic_server {
   }
   void connected_done() {
     wait_for_connect_ = false;
+    ++metrics_.connections_opened;
     json::object param;
     param["protocol_version"] = json::value(LRDB_SERVER_PROTOCOL_VERSION);
 
@@ -117,24 +125,52 @@ class basic_server {
   }
 
   bool send_message(const std::string& message) {
-    return command_stream_.send_message(message);
+    bool sent = command_stream_.send_message(message);
+    if (!sent) {
+      ++metrics_.send_failures;
+    }
+    return sent;
   }
   void execute_message(const std::string& message) {
     json::value msg;
     std::string err = json::parse(msg, message);
-    if (err.empty()) {
-      if (lrdb::message::is_request(msg)) {
-        lrdb::request_message request;
-        lrdb::message::parse(msg, request);
-        execute_request(request);
-      }
+    if (!err.empty()) {
+      ++metrics_.parse_errors;
+      return;
     }
+    if (!lrdb::message::is_request(msg)) {
+      ++metrics_.invalid_requests;
+      return;
+    }
+    lrdb::request_message request;
+    if (!lrdb::message::parse(msg, request)) {
+      ++metrics_.invalid_requests;
+      return;
+    }
+    execute_request(request);
   }
 
   bool send_notify(const lrdb::notify_message& message) {
+    ++metrics_.notifications_sent;
     return send_message(lrdb::message::serialize(message));
   }
   bool send_response(lrdb::response_message& message) {
+    if (message.error) {
+      switch (message.error->code) {
+        case lrdb::response_error::InvalidParams:
+          ++metrics_.invalid_params_errors;
+          break;
+        case lrdb::response_error::MethodNotFound:
+          ++metrics_.method_not_found_errors;
+          break;
+        case lrdb::response_error::InternalError:
+          ++metrics_.internal_errors;
+          break;
+        default:
+          break;
+      }
+    }
+    ++metrics_.responses_sent;
     return send_message(lrdb::message::serialize(message));
   }
   bool step_request(lrdb::response_message& response, const json::value&) {
@@ -382,8 +418,42 @@ class basic_server {
     return send_response(response);
   }
 
+  bool get_metrics_request(lrdb::response_message& response, const json::value&) {
+    response.result = get_metrics_snapshot();
+    return send_response(response);
+  }
+
   bool send_output(const json::value& message) {
     return send_notify(lrdb::notify_message("output", message));
+  }
+
+  json::value get_metrics_snapshot() const {
+    json::object metrics;
+    metrics["connections_opened"] =
+        json::value(static_cast<double>(metrics_.connections_opened.load()));
+    metrics["connections_closed"] =
+        json::value(static_cast<double>(metrics_.connections_closed.load()));
+    metrics["requests_received"] =
+        json::value(static_cast<double>(metrics_.requests_received.load()));
+    metrics["responses_sent"] =
+        json::value(static_cast<double>(metrics_.responses_sent.load()));
+    metrics["notifications_sent"] =
+        json::value(static_cast<double>(metrics_.notifications_sent.load()));
+    metrics["parse_errors"] =
+        json::value(static_cast<double>(metrics_.parse_errors.load()));
+    metrics["invalid_requests"] =
+        json::value(static_cast<double>(metrics_.invalid_requests.load()));
+    metrics["invalid_params_errors"] =
+        json::value(static_cast<double>(metrics_.invalid_params_errors.load()));
+    metrics["method_not_found_errors"] =
+        json::value(static_cast<double>(metrics_.method_not_found_errors.load()));
+    metrics["internal_errors"] =
+        json::value(static_cast<double>(metrics_.internal_errors.load()));
+    metrics["stream_errors"] =
+        json::value(static_cast<double>(metrics_.stream_errors.load()));
+    metrics["send_failures"] =
+        json::value(static_cast<double>(metrics_.send_failures.load()));
+    return json::value(metrics);
   }
 
   bool command_request(lrdb::response_message& response,
@@ -398,6 +468,7 @@ class basic_server {
   }
 
   void execute_request(const lrdb::request_message& req) {
+    ++metrics_.requests_received;
     typedef bool (basic_server::*exec_cmd_fn)(lrdb::response_message & response,
                                               const json::value& param);
 
@@ -416,6 +487,7 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(get_upvalues),
         LRDB_DEBUG_COMMAND_TABLE(eval),
         LRDB_DEBUG_COMMAND_TABLE(get_global),
+        LRDB_DEBUG_COMMAND_TABLE(get_metrics),
         LRDB_DEBUG_COMMAND_TABLE(command),
 #undef LRDB_DEBUG_COMMAND_TABLE
     };
@@ -432,6 +504,20 @@ class basic_server {
     }
   }
   bool wait_for_connect_;
+  struct reliability_metrics {
+    std::atomic<uint64_t> connections_opened{0};
+    std::atomic<uint64_t> connections_closed{0};
+    std::atomic<uint64_t> requests_received{0};
+    std::atomic<uint64_t> responses_sent{0};
+    std::atomic<uint64_t> notifications_sent{0};
+    std::atomic<uint64_t> parse_errors{0};
+    std::atomic<uint64_t> invalid_requests{0};
+    std::atomic<uint64_t> invalid_params_errors{0};
+    std::atomic<uint64_t> method_not_found_errors{0};
+    std::atomic<uint64_t> internal_errors{0};
+    std::atomic<uint64_t> stream_errors{0};
+    std::atomic<uint64_t> send_failures{0};
+  } metrics_;
   lrdb::debugger debugger_;
   StreamType command_stream_;
   console_adapter console_adapter_;
