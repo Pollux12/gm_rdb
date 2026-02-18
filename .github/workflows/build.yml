@@ -70,20 +70,27 @@ jobs:
       - name: Build project f0r client
         run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
 
+      - name: Find and copy DLLs
+        shell: bash
+        run: |
+          # Find all DLL files from both builds
+          mkdir -p output
+          find build -name '*.dll' -exec cp {} output/ \;
+          find build-client -name '*.dll' -exec cp {} output/ \;
+          ls -la output/
+
       - name: Strip debug information from binaries and keep them outside (Ubuntu)
         if: ${{ startsWith(matrix.os, 'ubuntu-') }}
         run: |
-          find . -name '*.dll' -exec objcopy --only-keep-debug {} {}.pdb \;
-          find . -name '*.dll' -exec objcopy --strip-debug {} \;
-          find . -name '*.dll' -exec objcopy --add-gnu-debuglink {}.pdb {} \;
+          find output -name '*.dll' -exec objcopy --only-keep-debug {} {}.pdb \;
+          find output -name '*.dll' -exec objcopy --strip-debug {} \;
+          find output -name '*.dll' -exec objcopy --add-gnu-debuglink {}.pdb {} \;
 
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: ${{matrix.os}}-${{matrix.arch}}-${{env.BUILD_TYPE}}
-          path: |
-            ./*.dll
-          #  ./*.pdb
+          path: output/*.dll
           if-no-files-found: error
 
 
