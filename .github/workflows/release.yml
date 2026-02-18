@@ -142,6 +142,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: gm_rdb ${{ steps.get_tag.outputs.tag }}
           draft: false
           generate_release_notes: true
