@@ -1,0 +1,171 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  GIT_BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || 'release' }}
+  BUILD_TYPE: RelWithDebInfo
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+        arch: [x64, x86]
+        include:
+          - os: windows-latest
+            arch: x86
+            CMAKE_ARCH_FLAG: -A Win32
+          - os: ubuntu-22.04
+            arch: x86
+            CMAKE_ARCH_FLAG: -DCMAKE_CXX_FLAGS="-m32" -DCMAKE_C_FLAGS="-m32"
+          - os: macos-13
+            arch: x64
+            CMAKE_ARCH_FLAG: -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: lukka/get-cmake@latest
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Install dependencies Ubuntu x86
+        if: ${{ startsWith(matrix.os, 'ubuntu-') && matrix.arch == 'x86' }}
+        run: |
+          sudo apt update
+          sudo apt install gcc-multilib g++-multilib
+
+      - name: Download garrysmod_common
+        uses: actions/checkout@v4
+        with:
+          repository: dankmolot/garrysmod_common
+          ref: ${{ matrix.arch == 'x64' && 'x86-64-cmake' || 'master-cmake' }}
+          submodules: recursive
+          path: third-party/garrysmod_common
+
+      - name: Configure project
+        run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}"
+
+      - name: Build project
+        run: cmake --build build -j -t rdb --config ${{env.BUILD_TYPE}}
+
+      - name: Configure project for client
+        run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build-client -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}" -DCLIENT_DLL=1
+
+      - name: Build project for client
+        run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
+
+      - name: Strip debug information from binaries and keep them outside (Ubuntu)
+        if: ${{ startsWith(matrix.os, 'ubuntu-') }}
+        run: |
+          find . -name '*.dll' -exec objcopy --only-keep-debug {} {}.pdb \;
+          find . -name '*.dll' -exec objcopy --strip-debug {} \;
+          find . -name '*.dll' -exec objcopy --add-gnu-debuglink {}.pdb {} \;
+
+      - name: "Upload artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{matrix.os}}-${{matrix.arch}}-${{env.BUILD_TYPE}}
+          path: |
+            ./*.dll
+          if-no-files-found: error
+
+  create_release:
+    name: Create Release & Upload Assets
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Get tag
+        id: get_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${{ github.ref_name }}"
+          else
+            # For manual runs or release events, get the latest tag
+            TAG=$(git describe --tags --abbrev=0)
+          fi
+          
+          # Check if release already exists for this tag
+          BASE_TAG="$TAG"
+          SUFFIX_CHAR="abcdefghijklmnopqrstuvwxyz"
+          SUFFIX_IDX=0
+          while gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; do
+            TAG="${BASE_TAG}${SUFFIX_CHAR:$SUFFIX_IDX:1}"
+            SUFFIX_IDX=$((SUFFIX_IDX + 1))
+          done
+          
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release packages
+        env:
+          TAG: ${{ steps.get_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for d in artifacts/*; do
+            if [ -d "$d" ]; then
+              dir=$(basename "$d")
+              IFS='-' read -r os _ arch _ <<< "$dir"
+              case "$os" in
+                ubuntu) os_n=linux ;;
+                macos) os_n=macos ;;
+                windows) os_n=windows ;;
+                *) os_n=$os ;;
+              esac
+              zipfile="release/gm_rdb-${os_n}-${arch}-${TAG}.zip"
+              echo "Creating $zipfile from $d"
+              zip -j "$zipfile" "$d"/* || true
+            fi
+          done
+          ls -lah release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: gm_rdb ${{ steps.get_tag.outputs.tag }}
+          draft: false
+          generate_release_notes: true
+          files: release/*.zip
+
+      - name: Append installation instructions to release body
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const tag = '${{ steps.get_tag.outputs.tag }}';
+            const { owner, repo } = context.repo;
+            if (!tag) {
+              core.info('No tag found in context; skipping release body update.');
+            } else {
+              const rel = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+              const current = rel.data.body || '';
+              const installText = `\n\n### Installation\n\nDownload the ZIP matching your platform from the **Assets** list and extract it. Copy the provided binary file(s) into your Garry's Mod install folder (restart GMod after replacing files):\n\n- Windows: copy the `.dll` into `garrysmod/bin`\n- Linux: copy the `.so`/`.dll` into `garrysmod/bin` (use the appropriate 32/64 folder)\n`;
+              if (!current.includes('\n### Installation')) {
+                await github.rest.repos.updateRelease({ owner, repo, release_id: rel.data.id, body: current + installText });
+                core.info('Appended installation instructions to release body.');
+              } else {
+                core.info('Release body already contains installation instructions; skipping.');
+              }
+            }

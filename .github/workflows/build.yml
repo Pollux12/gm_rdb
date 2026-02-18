@@ -4,8 +4,6 @@ on:
     branches:
       - master
       - dev
-    tags:
-      - 'v*'
     paths:
       - '**.hpp'
       - '**.h'
@@ -17,6 +15,8 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
+
+    
 env:
   GIT_BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || 'release' }}
   BUILD_TYPE: RelWithDebInfo
@@ -89,69 +89,4 @@ jobs:
           #  ./*.pdb
           if-no-files-found: error
 
-  create_release:
-    name: Create Release & Upload Assets
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      contents: write
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
 
-      - name: Prepare release packages
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          mkdir -p release
-          for d in artifacts/*; do
-            if [ -d "$d" ]; then
-              dir=$(basename "$d")
-              # dir example: windows-latest-x64-RelWithDebInfo
-              IFS='-' read -r os _ arch _ <<< "$dir"
-              case "$os" in
-                ubuntu) os_n=linux ;;
-                macos) os_n=macos ;;
-                windows) os_n=windows ;;
-                *) os_n=$os ;;
-              esac
-              zipfile="release/gm_rdb-${os_n}-${arch}-${TAG}.zip"
-              echo "Creating $zipfile from $d"
-              zip -j "$zipfile" "$d"/* || true
-            fi
-          done
-          ls -lah release
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: gm_rdb ${{ github.ref_name }}
-          draft: false
-          generate_release_notes: true
-          files: release/*.zip
-
-      - name: Append installation instructions to release body
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const tag = context.ref && context.ref.startsWith('refs/tags/')
-              ? context.ref.replace('refs/tags/', '')
-              : process.env.GITHUB_REF_NAME || '';
-            const { owner, repo } = context.repo;
-            if (!tag) {
-              core.info('No tag found in context; skipping release body update.');
-            } else {
-              const rel = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-              const current = rel.data.body || '';
-              const installText = `\n\n### Installation\n\nDownload the ZIP matching your platform from the **Assets** list and extract it. Copy the provided binary file(s) into your Garry's Mod install folder (restart GMod after replacing files):\n\n- Windows: copy the `.dll` into `garrysmod/bin`\n- Linux: copy the `.so`/`.dll` into `garrysmod/bin` (use the appropriate 32/64 folder)\n`;
-              if (!current.includes('\n### Installation')) {
-                await github.rest.repos.updateRelease({ owner, repo, release_id: rel.data.id, body: current + installText });
-                core.info('Appended installation instructions to release body.');
-              } else {
-                core.info('Release body already contains installation instructions; skipping.');
-              }
-            }
