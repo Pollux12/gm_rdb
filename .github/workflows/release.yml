@@ -24,9 +24,6 @@ jobs:
           - os: ubuntu-22.04
             arch: x86
             CMAKE_ARCH_FLAG: -DCMAKE_CXX_FLAGS="-m32" -DCMAKE_C_FLAGS="-m32"
-          - os: macos-13
-            arch: x64
-            CMAKE_ARCH_FLAG: -DCMAKE_OSX_ARCHITECTURES=x86_64
 
     runs-on: ${{ matrix.os }}
 
