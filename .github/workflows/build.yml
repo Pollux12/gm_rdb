@@ -70,27 +70,29 @@ jobs:
       - name: Build project f0r client
         run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
 
-      - name: Find and copy DLLs
+      - name: Find and copy binaries
         shell: bash
         run: |
-          # Find all DLL files from both builds
+          # Find all binary files from both builds (.dll for Windows, .so for Linux)
+          # AUTINSTALL copies them to root, but also check build directories
           mkdir -p output
-          find build -name '*.dll' -exec cp {} output/ \;
-          find build-client -name '*.dll' -exec cp {} output/ \;
+          find . -maxdepth 1 \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
+          find build \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
+          find build-client \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
           ls -la output/
 
       - name: Strip debug information from binaries and keep them outside (Ubuntu)
         if: ${{ startsWith(matrix.os, 'ubuntu-') }}
         run: |
-          find output -name '*.dll' -exec objcopy --only-keep-debug {} {}.pdb \;
-          find output -name '*.dll' -exec objcopy --strip-debug {} \;
-          find output -name '*.dll' -exec objcopy --add-gnu-debuglink {}.pdb {} \;
+          find output \( -name '*.dll' -o -name '*.so' \) -exec objcopy --only-keep-debug {} {}.pdb \;
+          find output \( -name '*.dll' -o -name '*.so' \) -exec objcopy --strip-debug {} \;
+          find output \( -name '*.dll' -o -name '*.so' \) -exec objcopy --add-gnu-debuglink {}.pdb {} \;
 
       - name: "Upload artifacts"
         uses: actions/upload-artifact@v4
         with:
           name: ${{matrix.os}}-${{matrix.arch}}-${{env.BUILD_TYPE}}
-          path: output/*.dll
+          path: output/*
           if-no-files-found: error
 
 
