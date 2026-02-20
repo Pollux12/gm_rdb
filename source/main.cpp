@@ -10,6 +10,7 @@ namespace rdb
 
 	static int32_t metatype = GarrysMod::Lua::Type::None;
 	static const int16_t default_port = 21111;
+	static lrdb_server *active_server = nullptr;
 
 	LUA_FUNCTION_STATIC( activate )
 	{
@@ -25,6 +26,8 @@ namespace rdb
 		else
 			*server = new lrdb_server( default_port );
 
+		active_server = *server;
+
 		( *server )->reset( LUA->GetState( ) );
 		return 0;
 	}
@@ -37,6 +40,7 @@ namespace rdb
 			delete *server;
 			*server = nullptr;
 		}
+		active_server = nullptr;
 
 		return 0;
 	}
@@ -49,6 +53,7 @@ namespace rdb
 			delete *server;
 			*server = nullptr;
 		}
+		active_server = nullptr;
 
 		return 0;
 	}
@@ -92,6 +97,12 @@ namespace rdb
 
 	static int32_t Deinitialize( GarrysMod::Lua::ILuaBase *LUA )
 	{
+		if( active_server != nullptr )
+		{
+			delete active_server;
+			active_server = nullptr;
+		}
+
 		LUA->PushNil( );
 		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, "rdb" );
 		return 0;

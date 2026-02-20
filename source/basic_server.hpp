@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cmath>
 #include <exception>
@@ -93,6 +94,10 @@ class basic_server {
     console_adapter_.set_callback(nullptr);
     debugger_.reset(nullptr);
     debugger_.unpause();
+    command_stream_.on_connection = nullptr;
+    command_stream_.on_data = nullptr;
+    command_stream_.on_close = nullptr;
+    command_stream_.on_error = nullptr;
     if (command_stream_.is_open()) {
       send_notify(lrdb::notify_message("exit"));
     }
@@ -351,6 +356,72 @@ class basic_server {
                            error_data("request", "stack_no"));
       return false;
     }
+    return true;
+  }
+
+  static bool is_space(char ch) {
+    return std::isspace(static_cast<unsigned char>(ch)) != 0;
+  }
+
+  static bool is_valid_command_name_char(char ch) {
+    const unsigned char c = static_cast<unsigned char>(ch);
+    return std::isalnum(c) != 0 || ch == '_' || ch == '.' || ch == '+' ||
+           ch == '-';
+  }
+
+  bool validate_console_command(const std::string& command,
+                                std::string& reason) const {
+    if (command.empty()) {
+      reason = "empty command";
+      return false;
+    }
+    if (command.size() > kMaxConsoleCommandBytes) {
+      reason = "command exceeds size limit";
+      return false;
+    }
+
+    for (const char ch : command) {
+      const unsigned char value = static_cast<unsigned char>(ch);
+      if (ch == '\0') {
+        reason = "command contains null byte";
+        return false;
+      }
+      if (ch == ';') {
+        reason = "command chaining is not allowed";
+        return false;
+      }
+      if (std::iscntrl(value) != 0 && ch != '\t' && ch != ' ') {
+        reason = "command contains control characters";
+        return false;
+      }
+    }
+
+    size_t start = 0;
+    while (start < command.size() && is_space(command[start])) {
+      ++start;
+    }
+    if (start == command.size()) {
+      reason = "empty command";
+      return false;
+    }
+
+    size_t end = start;
+    while (end < command.size() && !is_space(command[end])) {
+      ++end;
+    }
+    const std::string command_name = command.substr(start, end - start);
+    if (command_name.size() > kMaxConsoleCommandNameBytes) {
+      reason = "command name exceeds size limit";
+      return false;
+    }
+
+    for (const char ch : command_name) {
+      if (!is_valid_command_name_char(ch)) {
+        reason = "invalid command name";
+        return false;
+      }
+    }
+
     return true;
   }
   bool step_request(lrdb::response_message& response, const json::value&) {
@@ -666,13 +737,33 @@ class basic_server {
     if (!ensure_attached(response, "command")) {
       return send_response(response);
     }
-    if (!param.is<std::string>() || param.get<std::string>().empty()) {
+    if (!param.is<std::string>()) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
                            "invalid params", "command",
                            error_data("request", "params"));
       return send_response(response);
     }
-    console_adapter_.run_command( param.get<std::string>() );
+
+    const std::string command = param.get<std::string>();
+    std::string validation_error;
+    if (!validate_console_command(command, validation_error)) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid command", "command",
+                           error_data("request", "command", validation_error));
+      return send_response(response);
+    }
+
+    std::string dispatch_error;
+    if (!console_adapter_.run_command(command, dispatch_error)) {
+      set_structured_error(
+          response, lrdb::response_error::InternalError,
+          "failed to execute command", "command",
+          error_data("request", "command",
+                     dispatch_error.empty() ? "unknown command dispatch error"
+                                            : dispatch_error));
+      return send_response(response);
+    }
+
     return send_response(response);
   }
 
@@ -736,6 +827,8 @@ class basic_server {
   static constexpr int kConnectionWaitTimeoutMs = 100;
   static constexpr int kMaxObjectDepth = 8;
   static constexpr size_t kMaxEvalChunkBytes = 16 * 1024;
+  static constexpr size_t kMaxConsoleCommandBytes = 2048;
+  static constexpr size_t kMaxConsoleCommandNameBytes = 128;
 
   bool wait_for_connect_;
   bool attached_;

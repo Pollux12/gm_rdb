@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <string>
 #include <functional>
 #include <condition_variable>
 
@@ -38,7 +39,7 @@ public:
 
 	void set_callback( const std::function<void( const json::value &message )> &callback );
 
-	void run_command( const std::string &command );
+	bool run_command( const std::string &command, std::string &error_message );
 
 private:
 	void start( std::unique_lock<std::mutex> &lock );
@@ -53,6 +54,7 @@ private:
 	std::condition_variable m_condition;
 	std::thread m_thread;
 	std::atomic_bool m_thread_stop;
+	std::atomic_bool m_accept_logs;
 	std::vector<json::value> m_messages;
 	std::function<void( const json::value &message )> m_callback;
 

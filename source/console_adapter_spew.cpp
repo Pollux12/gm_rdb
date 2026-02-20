@@ -8,6 +8,7 @@
 #include <eiface.h>
 
 SpewOutputFunc_t console_adapter::s_original_spew = nullptr;
+std::atomic_bool console_adapter::s_hook_active = false;
 std::mutex console_adapter::s_mutex;
 std::condition_variable console_adapter::s_condition;
 std::vector<json::value> console_adapter::s_messages;
@@ -44,19 +45,35 @@ void console_adapter::set_callback( const std::function<void( const json::value 
 	else
 		stop( lock );
 }
-
-void console_adapter::run_command( const std::string &command )
+bool console_adapter::run_command( const std::string &command, std::string &error_message )
 {
+	if( command.empty( ) )
+	{
+		error_message = "empty command";
+		return false;
+	}
 
 #if IS_SERVERSIDE
+	if( m_engine_server == nullptr )
+	{
+		error_message = "engine server interface unavailable";
+		return false;
+	}
 
 	m_engine_server->ServerCommand( command.c_str( ) );
 
 #else
+	if( m_engine_client == nullptr )
+	{
+		error_message = "engine client interface unavailable";
+		return false;
+	}
 
 	m_engine_client->ClientCmd_Unrestricted( command.c_str( ) );
 
 #endif
+
+	return true;
 
 }
 
@@ -65,9 +82,13 @@ void console_adapter::start( [[maybe_unused]] std::unique_lock<std::mutex> &lock
 	if( !m_thread_stop )
 		return;
 
+	if( s_hook_active )
+		return;
+
 	s_original_spew = GetSpewOutputFunc( );
 	SpewOutputFunc( &console_adapter::Log );
 
+	s_hook_active = true;
 	m_thread_stop = false;
 	m_thread = std::thread( &console_adapter::queue_dispatcher, this );
 }
@@ -77,7 +98,9 @@ void console_adapter::stop( std::unique_lock<std::mutex> &lock )
 	if( m_thread_stop )
 		return;
 
-	SpewOutputFunc( s_original_spew );
+	s_hook_active = false;
+	if( s_original_spew )
+		SpewOutputFunc( s_original_spew );
 	s_original_spew = nullptr;
 
 	s_messages.clear( );
@@ -85,33 +108,56 @@ void console_adapter::stop( std::unique_lock<std::mutex> &lock )
 	m_thread_stop = true;
 	lock.unlock( );
 	s_condition.notify_all( );
-	m_thread.join( );
+	if( m_thread.joinable( ) )
+		m_thread.join( );
 }
 
 void console_adapter::queue_dispatcher( )
 {
-	while( !m_thread_stop )
+	while( true )
 	{
 		std::vector<json::value> messages;
+		std::function<void( const json::value &message )> callback;
 		{
 			std::unique_lock<std::mutex> lock( s_mutex );
 			s_condition.wait( lock, [this] { return !s_messages.empty( ) || m_thread_stop; } );
-			if( m_thread_stop )
+			if( m_thread_stop && s_messages.empty( ) )
 				break;
 
 			std::swap( messages, s_messages );
+			callback = m_callback;
 		}
 
+		if( !callback )
+			continue;
+
 		for( const json::value &message : messages )
-			m_callback( message );
+		{
+			try
+			{
+				callback( message );
+			}
+			catch( ... )
+			{
+				// Keep the dispatch thread alive even if callback throws.
+			}
+		}
 	}
 }
 
 SpewRetval_t console_adapter::Log( SpewType_t spewType, const tchar *pMsg )
 {
+	SpewOutputFunc_t original = nullptr;
 	std::unique_lock<std::mutex> lock( s_mutex );
+	original = s_original_spew;
+	if( !s_hook_active )
+		return original ? original( spewType, pMsg ) : SPEW_CONTINUE;
 
-	const Color &color = *GetSpewOutputColor( );
+	if( pMsg == nullptr )
+		return original ? original( spewType, "" ) : SPEW_CONTINUE;
+
+	const Color *output_color = GetSpewOutputColor( );
+	const Color color = output_color ? *output_color : Color( 255, 255, 255, 255 );
 
 	json::object jcolor;
 	jcolor["r"] = json::value( static_cast<double>( color.r( ) ) );
@@ -131,7 +177,7 @@ SpewRetval_t console_adapter::Log( SpewType_t spewType, const tchar *pMsg )
 	lock.unlock( );
 	s_condition.notify_all( );
 
-	return s_original_spew( spewType, pMsg );
+	return original ? original( spewType, pMsg ) : SPEW_CONTINUE;
 }
 
 #endif

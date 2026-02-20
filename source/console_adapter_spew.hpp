@@ -5,6 +5,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <string>
 #include <functional>
 #include <condition_variable>
 
@@ -39,7 +40,7 @@ public:
 
 	void set_callback( const std::function<void( const json::value &message )> &callback );
 
-	void run_command( const std::string &command );
+	bool run_command( const std::string &command, std::string &error_message );
 
 private:
 	void start( std::unique_lock<std::mutex> &lock );
@@ -51,6 +52,7 @@ private:
 	static SpewRetval_t Log( SpewType_t spewType, const tchar *pMsg );
 
 	static SpewOutputFunc_t s_original_spew;
+	static std::atomic_bool s_hook_active;
 	static std::mutex s_mutex;
 	static std::condition_variable s_condition;
 	static std::vector<json::value> s_messages;
