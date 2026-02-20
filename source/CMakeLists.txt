@@ -4,6 +4,9 @@ source_group(TREE ${CMAKE_CURRENT_LIST_DIR} PREFIX "Sources" FILES ${SOURCES})
 
 add_library(rdb SHARED ${SOURCES})
 
+math(EXPR GM_RDB_VERSION_NUM
+    "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
+
 target_link_libraries(rdb PRIVATE
     gmod::common
     gmod::helpers_extended
@@ -25,7 +28,11 @@ target_include_directories(rdb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../picojson
 )
 
-target_compile_definitions(rdb PRIVATE -D_WIN32_WINNT=0x0601)
+target_compile_definitions(rdb PRIVATE
+    _WIN32_WINNT=0x0601
+    GM_RDB_VERSION=\"${PROJECT_VERSION}\"
+    GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
+)
 
 set_gmod_suffix_prefix(rdb)
 

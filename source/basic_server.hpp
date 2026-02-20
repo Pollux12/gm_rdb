@@ -26,7 +26,11 @@
 #include "console_adapter_logging.hpp"
 #include "console_adapter_spew.hpp"
 
-#define LRDB_SERVER_PROTOCOL_VERSION "gmod-1"
+#define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
+
+#ifndef GM_RDB_VERSION
+#define GM_RDB_VERSION "0.0.0"
+#endif
 
 namespace json
 {
@@ -161,6 +165,7 @@ class basic_server {
     ++metrics_.connections_opened;
     json::object param;
     param["protocol_version"] = json::value(LRDB_SERVER_PROTOCOL_VERSION);
+    param["module_version"] = json::value(GM_RDB_VERSION);
 
     json::object lua;
     lua["version"] = json::value(LUA_VERSION);
@@ -818,9 +823,14 @@ class basic_server {
         send_response(response);
       }
     } else {
+      json::object method_error_detail;
+      method_error_detail["phase"] = json::value("request");
+      method_error_detail["category"] = json::value("method");
+      method_error_detail["protocol_version"] =
+          json::value(LRDB_SERVER_PROTOCOL_VERSION);
       set_structured_error(response, lrdb::response_error::MethodNotFound,
                            "method not found : " + req.method, req.method,
-                           error_data("request", "method"));
+                           json::value(method_error_detail));
       send_response(response);
     }
   }

@@ -15,6 +15,8 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+set(GM_RDB_VERSION "1.2.0")
+
 # Get the latest abbreviated commit hash of the working branch
 execute_process(
     COMMAND git log -1 --format=%h
@@ -34,7 +36,7 @@ if(NOT DEFINED GIT_BRANCH)
 endif()
 
 project(gm_rdb 
-    VERSION 1.0.0
+    VERSION ${GM_RDB_VERSION}
     LANGUAGES C CXX
     HOMEPAGE_URL "https://github.com/Pollux12/emmylua-rust/tree/master/gm_rdb"
 )
