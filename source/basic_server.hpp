@@ -13,6 +13,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <regex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -25,6 +26,7 @@
 
 #include "console_adapter_logging.hpp"
 #include "console_adapter_spew.hpp"
+#include "error_aggregator.hpp"
 
 #define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
 
@@ -65,6 +67,7 @@ class basic_server {
         attached_(false),
         disposed_(false),
         has_active_connection_(false),
+        pending_pause_on_error_(false),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
   }
@@ -76,6 +79,8 @@ class basic_server {
   void reset(lua_State* L = nullptr) {
     attached_ = L != nullptr;
     disposed_ = false;
+    pending_pause_on_error_.store(false);
+    error_aggregator_.clear();
     debugger_.reset(L);
     if (!L) {
       wait_for_connect_ = true;
@@ -83,7 +88,9 @@ class basic_server {
       console_adapter_.set_callback(nullptr);
       command_stream_.reconnect();
     } else {
-      console_adapter_.set_callback(std::bind(&basic_server<StreamType>::send_output, this, std::placeholders::_1));
+      console_adapter_.set_callback(std::bind(
+          &basic_server<StreamType>::handle_console_output, this,
+          std::placeholders::_1));
     }
   }
 
@@ -95,6 +102,8 @@ class basic_server {
     disposed_ = true;
     attached_ = false;
     wait_for_connect_ = true;
+    pending_pause_on_error_.store(false);
+    error_aggregator_.clear();
     console_adapter_.set_callback(nullptr);
     debugger_.reset(nullptr);
     debugger_.unpause();
@@ -126,6 +135,10 @@ class basic_server {
     debugger_.set_tick_handler([&](lrdb::debugger&) {
       if (disposed_) {
         return;
+      }
+      if (pending_pause_on_error_.exchange(false) && attached_ &&
+          !debugger_.paused()) {
+        debugger_.pause_now();
       }
       if (wait_for_connect_) {
         if (!wait_for_connection_with_timeout()) {
@@ -702,6 +715,103 @@ class basic_server {
     return send_response(response);
   }
 
+  static std::string trim_copy(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+      ++begin;
+    }
+
+    size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+      --end;
+    }
+
+    return value.substr(begin, end - begin);
+  }
+
+  static bool try_extract_lua_error_from_line(const std::string& line,
+                                              std::string& out_message) {
+    static const std::regex kStackTraceRegex(R"(stack traceback:)",
+                                             std::regex::icase);
+    static const std::regex kStackFrameRegex(R"(^\d+\.\s+)");
+    static const std::regex kLuaPathErrorRegex(
+        R"(^\s*(?:[A-Za-z]:)?@?(?:[^:\r\n]*[\\/])?[^:\r\n]*\.lua:\d+:\s*(.+?)\s*$)",
+        std::regex::icase);
+
+    std::string trimmed = trim_copy(line);
+    if (trimmed.empty() || std::regex_search(trimmed, kStackTraceRegex)) {
+      return false;
+    }
+
+    const std::string error_prefix = "[ERROR]";
+    bool has_error_prefix = false;
+    if (trimmed.compare(0, error_prefix.size(), error_prefix) == 0) {
+      trimmed = trim_copy(trimmed.substr(error_prefix.size()));
+      has_error_prefix = true;
+    }
+
+    if (trimmed.empty() || std::regex_search(trimmed, kStackTraceRegex) ||
+        std::regex_search(trimmed, kStackFrameRegex)) {
+      return false;
+    }
+
+    std::smatch match;
+    if (std::regex_match(trimmed, match, kLuaPathErrorRegex) &&
+        match.size() >= 2) {
+      out_message = trim_copy(match[1].str());
+      return !out_message.empty();
+    }
+
+    if (has_error_prefix) {
+      out_message = trimmed;
+      return !out_message.empty();
+    }
+
+    return false;
+  }
+
+  bool try_extract_lua_error_message(const json::value& message,
+                                     std::string& out_message) const {
+    if (!message.is<json::object>() || !message.contains("message") ||
+        !message.get("message").is<std::string>()) {
+      return false;
+    }
+
+    return try_extract_lua_error_from_line(
+        message.get("message").get<std::string>(), out_message);
+  }
+
+  void emit_error_notification(const std::string& message,
+                               const std::string& fingerprint,
+                               int count) {
+    json::object param;
+    param["message"] = json::value(message);
+    param["fingerprint"] = json::value(fingerprint);
+    param["count"] = json::value(static_cast<double>(count));
+    param["source"] = json::value("lua");
+    send_notify(lrdb::notify_message("error", json::value(param)));
+  }
+
+  void handle_console_output(const json::value& message) {
+    send_output(message);
+
+    std::string lua_error;
+    if (!try_extract_lua_error_message(message, lua_error)) {
+      return;
+    }
+
+    const auto aggregated = error_aggregator_.add_error(lua_error);
+    emit_error_notification(lua_error, aggregated.first, aggregated.second);
+
+    // Pause requests are queued and fulfilled from debugger tick context to
+    // avoid touching debugger state from console callback threads.
+    if (attached_ && !disposed_) {
+      pending_pause_on_error_.store(true);
+    }
+  }
+
   bool send_output(const json::value& message) {
     return send_notify(lrdb::notify_message("output", message));
   }
@@ -772,6 +882,20 @@ class basic_server {
     return send_response(response);
   }
 
+  bool clear_error_cache_request(lrdb::response_message& response,
+                                 const json::value& param) {
+    if (!param.is<json::null>() && !param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "clear_error_cache",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    error_aggregator_.clear();
+    pending_pause_on_error_.store(false);
+    return send_response(response);
+  }
+
   void execute_request(const lrdb::request_message& req) {
     ++metrics_.requests_received;
     typedef bool (basic_server::*exec_cmd_fn)(lrdb::response_message & response,
@@ -795,6 +919,7 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(get_global),
         LRDB_DEBUG_COMMAND_TABLE(get_metrics),
         LRDB_DEBUG_COMMAND_TABLE(command),
+        LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
 #undef LRDB_DEBUG_COMMAND_TABLE
     };
 
@@ -844,6 +969,7 @@ class basic_server {
   bool attached_;
   bool disposed_;
   bool has_active_connection_;
+  std::atomic_bool pending_pause_on_error_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};
     std::atomic<uint64_t> connections_closed{0};
@@ -859,6 +985,7 @@ class basic_server {
     std::atomic<uint64_t> send_failures{0};
     std::atomic<uint64_t> connection_wait_timeouts{0};
   } metrics_;
+  error_aggregator error_aggregator_;
   lrdb::debugger debugger_;
   StreamType command_stream_;
   console_adapter console_adapter_;
