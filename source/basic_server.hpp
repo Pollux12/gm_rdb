@@ -640,9 +640,6 @@ class basic_server {
       }
       const char* name = s.name();
       if (!name || name[0] == '\0') {
-        name = s.name();
-      }
-      if (!name || name[0] == '\0') {
         name = s.namewhat();
       }
       if (!name || name[0] == '\0') {
@@ -651,7 +648,7 @@ class basic_server {
       if (!name || name[0] == '\0') {
         name = s.source();
       }
-      data["func"] = json::value(name);
+      data["func"] = json::value(name != nullptr ? name : "?");
       data["line"] = json::value(double(s.currentline()));
       data["id"] = json::value(s.short_src());
       res.push_back(json::value(data));

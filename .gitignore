@@ -1,3 +1,6 @@
 /projects/
 CMakeUserPresets.json
 /build
+/build*/
+/output/
+/.vscode/

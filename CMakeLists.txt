@@ -35,7 +35,7 @@ if(NOT DEFINED GIT_BRANCH)
     )
 endif()
 
-project(gm_rdb 
+project(gm_rdb
     VERSION ${GM_RDB_VERSION}
     LANGUAGES C CXX
     HOMEPAGE_URL "https://github.com/Pollux12/emmylua-rust/tree/master/gm_rdb"
@@ -48,6 +48,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_compile_definitions(WIN64)
+endif()
 
 find_package(GarrysmodCommon REQUIRED)
 

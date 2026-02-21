@@ -11,6 +11,9 @@ namespace rdb
 	static int32_t metatype = GarrysMod::Lua::Type::None;
 	static const int16_t default_port = 21111;
 	static lrdb_server *active_server = nullptr;
+	// Pointer to the inner slot inside the Lua userdata. Kept in sync so that
+	// Deinitialize can null it before GC runs destruct, preventing a double-free.
+	static lrdb_server **active_server_ptr = nullptr;
 
 	LUA_FUNCTION_STATIC( activate )
 	{
@@ -27,6 +30,7 @@ namespace rdb
 			*server = new lrdb_server( default_port );
 
 		active_server = *server;
+		active_server_ptr = server;
 
 		( *server )->reset( LUA->GetState( ), LUA );
 		return 0;
@@ -41,6 +45,7 @@ namespace rdb
 			*server = nullptr;
 		}
 		active_server = nullptr;
+		active_server_ptr = nullptr;
 
 		return 0;
 	}
@@ -54,6 +59,7 @@ namespace rdb
 			*server = nullptr;
 		}
 		active_server = nullptr;
+		active_server_ptr = nullptr;
 
 		return 0;
 	}
@@ -67,6 +73,7 @@ namespace rdb
 
 		lrdb_server **server = LUA->NewUserType<lrdb_server *>( metatype );
 		*server = nullptr;
+		active_server_ptr = server;
 
 		LUA->Push( -2 ); // push metatable to the stack top
 		LUA->SetMetaTable( -2 ); // pop reference on stack top and set it as metatable of userdata
@@ -99,6 +106,14 @@ namespace rdb
 	{
 		if( active_server != nullptr )
 		{
+			// Null the userdata's inner pointer BEFORE deleting, so that if the
+			// Lua GC fires destruct (e.g. triggered by SetField below), it sees
+			// nullptr and does not attempt a second delete (double-free).
+			if( active_server_ptr != nullptr )
+			{
+				*active_server_ptr = nullptr;
+				active_server_ptr = nullptr;
+			}
 			delete active_server;
 			active_server = nullptr;
 		}

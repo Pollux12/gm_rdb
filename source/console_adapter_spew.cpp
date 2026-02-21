@@ -85,6 +85,12 @@ void console_adapter::start( [[maybe_unused]] std::unique_lock<std::mutex> &lock
 	if( s_hook_active )
 		return;
 
+#if defined( WIN64 )
+	// Tier0 spew exports are not available for x64 in our current SDK linkage,
+	// so log interception is disabled on this platform.
+	return;
+#endif
+
 	s_original_spew = GetSpewOutputFunc( );
 	SpewOutputFunc( &console_adapter::Log );
 
@@ -97,6 +103,10 @@ void console_adapter::stop( std::unique_lock<std::mutex> &lock )
 {
 	if( m_thread_stop )
 		return;
+
+#if defined( WIN64 )
+	return;
+#endif
 
 	s_hook_active = false;
 	if( s_original_spew )
@@ -155,6 +165,10 @@ SpewRetval_t console_adapter::Log( SpewType_t spewType, const tchar *pMsg )
 
 	if( pMsg == nullptr )
 		return original ? original( spewType, "" ) : SPEW_CONTINUE;
+
+#if defined( WIN64 )
+	return original ? original( spewType, pMsg ) : SPEW_CONTINUE;
+#endif
 
 	const Color *output_color = GetSpewOutputColor( );
 	const Color color = output_color ? *output_color : Color( 255, 255, 255, 255 );
