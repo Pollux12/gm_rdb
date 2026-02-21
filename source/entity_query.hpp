@@ -1,0 +1,628 @@
+#pragma once
+
+#include <GarrysMod/Lua/Interface.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+#include <picojson.h>
+
+class EntityQuery {
+ public:
+  explicit EntityQuery(GarrysMod::Lua::ILuaBase* lua)
+      : lua_(lua), last_total_(0) {}
+
+  picojson::array list_entities(int offset, int limit, int filter_id,
+                                const std::string& filter_class) {
+    picojson::array entities;
+    last_total_ = 0;
+    if (lua_ == nullptr || limit < 0) {
+      return entities;
+    }
+
+    if (offset < 0) {
+      offset = 0;
+    }
+    if (limit > kMaxPageLimit) {
+      limit = kMaxPageLimit;
+    }
+
+    stack_guard guard(lua_);
+
+    if (filter_id > 0) {
+      if (!push_entity_by_index(filter_id)) {
+        return entities;
+      }
+      picojson::object summary = build_entity_summary(-1);
+      if (matches_class_filter(summary, filter_class)) {
+        last_total_ = 1;
+        if (offset == 0) {
+          entities.emplace_back(summary);
+        }
+      }
+      return entities;
+    }
+
+    if (!push_ents_table()) {
+      return entities;
+    }
+
+    const int ents_table = abs_index(-1);
+    lua_->GetField(ents_table, "GetAll");
+    if (!is_type(-1, "function")) {
+      return entities;
+    }
+
+    lua_->Push(ents_table);
+    pcall_checked(1, 1, "ents.GetAll");
+
+    if (!is_type(-1, "table")) {
+      return entities;
+    }
+
+    const int all_entities = abs_index(-1);
+    lua_->PushNil();
+
+    int matched = 0;
+    while (lua_->Next(all_entities) != 0) {
+      const picojson::object summary = build_entity_summary(-1);
+      lua_->Pop(1);  // Pop entity value, keep iterator key.
+
+      if (!matches_class_filter(summary, filter_class)) {
+        continue;
+      }
+
+      if (matched >= offset && static_cast<int>(entities.size()) < limit) {
+        entities.emplace_back(summary);
+      }
+      ++matched;
+    }
+
+    last_total_ = matched;
+    return entities;
+  }
+
+  picojson::object get_entity_detail(int entity_index) {
+    picojson::object detail;
+    detail["index"] = picojson::value(static_cast<double>(entity_index));
+    detail["valid"] = picojson::value(false);
+
+    if (entity_index <= 0 || lua_ == nullptr) {
+      return detail;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return detail;
+    }
+
+    const int entity = abs_index(-1);
+    detail = build_entity_summary(entity);
+
+    double parent_index = 0.0;
+    bool has_parent = false;
+    if (invoke_entity_method(entity, "GetParent", 0, 1)) {
+      const int parent = abs_index(-1);
+      bool parent_valid = false;
+      try_get_entity_bool(parent, "IsValid", parent_valid);
+      if (parent_valid && try_get_entity_number(parent, "EntIndex", parent_index)) {
+        has_parent = true;
+      }
+      lua_->Pop(1);
+    }
+
+    detail["parent_index"] =
+        has_parent ? picojson::value(parent_index) : picojson::value();
+
+    double health = 0.0;
+    if (try_get_entity_number(entity, "Health", health)) {
+      detail["health"] = picojson::value(health);
+    }
+
+    detail["properties"] = picojson::value(read_entity_properties(entity));
+    return detail;
+  }
+
+  bool set_entity_field(int entity_index, const std::string& field_name,
+                        const picojson::value& field_value) {
+    if (lua_ == nullptr || entity_index <= 0 ||
+        !is_valid_field_name(field_name)) {
+      return false;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
+
+    if (!push_json_primitive(field_value)) {
+      return false;
+    }
+
+    lua_->SetField(entity, field_name.c_str());
+    return true;
+  }
+
+  bool set_entity_pos(int entity_index, double x, double y, double z) {
+    if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(x) ||
+        !std::isfinite(y) || !std::isfinite(z)) {
+      return false;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
+
+    lua_->GetField(entity, "SetPos");
+    if (!is_type(-1, "function")) {
+      return false;
+    }
+
+    lua_->Push(entity);
+    if (!push_global_constructor_3("Vector", x, y, z)) {
+      return false;
+    }
+
+    pcall_checked(2, 0, "Entity:SetPos");
+    return true;
+  }
+
+  bool set_entity_angles(int entity_index, double pitch, double yaw,
+                         double roll) {
+    if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(pitch) ||
+        !std::isfinite(yaw) || !std::isfinite(roll)) {
+      return false;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
+
+    lua_->GetField(entity, "SetAngles");
+    if (!is_type(-1, "function")) {
+      return false;
+    }
+
+    lua_->Push(entity);
+    if (!push_global_constructor_3("Angle", pitch, yaw, roll)) {
+      return false;
+    }
+
+    pcall_checked(2, 0, "Entity:SetAngles");
+    return true;
+  }
+
+  int last_total() const { return last_total_; }
+
+ private:
+  class stack_guard {
+   public:
+    explicit stack_guard(GarrysMod::Lua::ILuaBase* lua)
+        : lua_(lua), top_(lua ? lua->Top() : 0) {}
+
+    ~stack_guard() {
+      if (lua_ == nullptr) {
+        return;
+      }
+      const int current_top = lua_->Top();
+      if (current_top > top_) {
+        lua_->Pop(current_top - top_);
+      }
+    }
+
+   private:
+    GarrysMod::Lua::ILuaBase* lua_;
+    int top_;
+  };
+
+  int abs_index(int index) const {
+    if (index > 0) {
+      return index;
+    }
+    return lua_->Top() + index + 1;
+  }
+
+  bool is_type(int index, const char* type_name) const {
+    const char* actual = lua_->GetTypeName(lua_->GetType(index));
+    return actual != nullptr && std::strcmp(actual, type_name) == 0;
+  }
+
+  static bool is_valid_field_name(const std::string& field_name) {
+    if (field_name.empty() || field_name.size() > 64) {
+      return false;
+    }
+
+    if (field_name.size() >= 2 && field_name[0] == '_' && field_name[1] == '_') {
+      return false;
+    }
+
+    for (const char ch : field_name) {
+      const unsigned char value = static_cast<unsigned char>(ch);
+      if (std::isalnum(value) == 0 && ch != '_') {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  static bool contains_case_insensitive(const std::string& text,
+                                        const std::string& needle) {
+    if (needle.empty()) {
+      return true;
+    }
+
+    return std::search(text.begin(), text.end(), needle.begin(), needle.end(),
+                       [](char lhs, char rhs) {
+                         return std::tolower(static_cast<unsigned char>(lhs)) ==
+                                std::tolower(static_cast<unsigned char>(rhs));
+                       }) != text.end();
+  }
+
+  std::string get_string_or_empty(int index) const {
+    const char* value = lua_->GetString(index);
+    return value == nullptr ? std::string() : std::string(value);
+  }
+
+  void pcall_checked(int args, int results, const char* context) {
+    if (lua_->PCall(args, results, 0) == 0) {
+      return;
+    }
+
+    std::string error = get_string_or_empty(-1);
+    lua_->Pop(1);
+
+    throw std::runtime_error(
+        std::string(context) + ": " +
+        (error.empty() ? "unknown lua runtime error" : error));
+  }
+
+  bool push_ents_table() {
+    lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_->GetField(-1, "ents");
+    if (!is_type(-1, "table")) {
+      lua_->Pop(2);
+      return false;
+    }
+
+    lua_->Remove(-2);  // Remove global table.
+    return true;
+  }
+
+  bool push_entity_by_index(int entity_index) {
+    if (entity_index <= 0 || !push_ents_table()) {
+      return false;
+    }
+
+    const int ents_table = abs_index(-1);
+    lua_->GetField(ents_table, "GetByIndex");
+    if (!is_type(-1, "function")) {
+      lua_->Pop(2);
+      return false;
+    }
+
+    lua_->Push(ents_table);
+    lua_->PushNumber(static_cast<double>(entity_index));
+    pcall_checked(2, 1, "ents.GetByIndex");
+
+    lua_->Remove(-2);  // Remove ents table.
+    return !is_type(-1, "nil");
+  }
+
+  bool invoke_entity_method(int entity_index, const char* method_name,
+                            int args, int results) {
+    lua_->GetField(entity_index, method_name);
+    if (!is_type(-1, "function")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    lua_->Push(entity_index);
+    pcall_checked(args + 1, results, method_name);
+    return true;
+  }
+
+  bool try_get_entity_number(int entity_index, const char* method_name,
+                             double& out) {
+    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+      return false;
+    }
+
+    if (!is_type(-1, "number")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    out = lua_->GetNumber(-1);
+    lua_->Pop(1);
+    return true;
+  }
+
+  bool try_get_entity_bool(int entity_index, const char* method_name,
+                           bool& out) {
+    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+      return false;
+    }
+
+    if (!is_type(-1, "bool")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    out = lua_->GetBool(-1);
+    lua_->Pop(1);
+    return true;
+  }
+
+  bool try_get_entity_string(int entity_index, const char* method_name,
+                             std::string& out) {
+    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+      return false;
+    }
+
+    if (!is_type(-1, "string")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    out = get_string_or_empty(-1);
+    lua_->Pop(1);
+    return true;
+  }
+
+  bool try_get_numeric_field(int object_index, const char* field_name,
+                             double& out) {
+    lua_->GetField(object_index, field_name);
+    if (!is_type(-1, "number")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    out = lua_->GetNumber(-1);
+    lua_->Pop(1);
+    return true;
+  }
+
+  bool try_read_triplet(int object_index, const char* first, const char* second,
+                        const char* third, picojson::array& out) {
+    double a = 0.0;
+    double b = 0.0;
+    double c = 0.0;
+
+    if (!try_get_numeric_field(object_index, first, a) ||
+        !try_get_numeric_field(object_index, second, b) ||
+        !try_get_numeric_field(object_index, third, c)) {
+      return false;
+    }
+
+    out = {picojson::value(a), picojson::value(b), picojson::value(c)};
+    return true;
+  }
+
+  bool try_get_entity_triplet(int entity_index, const char* method_name,
+                              const char* first, const char* second,
+                              const char* third, picojson::array& out) {
+    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+      return false;
+    }
+
+    const int object_index = abs_index(-1);
+    const bool parsed = try_read_triplet(object_index, first, second, third, out);
+    lua_->Pop(1);
+    return parsed;
+  }
+
+  static std::string read_class_name(const picojson::object& summary) {
+    const auto match = summary.find("class");
+    if (match == summary.end() || !match->second.is<std::string>()) {
+      return std::string();
+    }
+
+    return match->second.get<std::string>();
+  }
+
+  static bool matches_class_filter(const picojson::object& summary,
+                                   const std::string& filter_class) {
+    if (filter_class.empty()) {
+      return true;
+    }
+
+    return contains_case_insensitive(read_class_name(summary), filter_class);
+  }
+
+  picojson::object build_entity_summary(int entity_index) {
+    const int entity = abs_index(entity_index);
+
+    picojson::object summary;
+    summary["index"] = picojson::value(0.0);
+    summary["class"] = picojson::value(std::string());
+    summary["model"] = picojson::value(std::string());
+    summary["valid"] = picojson::value(false);
+    summary["pos"] = picojson::value(
+        picojson::array{picojson::value(0.0), picojson::value(0.0),
+                        picojson::value(0.0)});
+    summary["angles"] = picojson::value(
+        picojson::array{picojson::value(0.0), picojson::value(0.0),
+                        picojson::value(0.0)});
+
+    double ent_index = 0.0;
+    if (try_get_entity_number(entity, "EntIndex", ent_index)) {
+      summary["index"] = picojson::value(ent_index);
+    }
+
+    bool valid = false;
+    if (try_get_entity_bool(entity, "IsValid", valid)) {
+      summary["valid"] = picojson::value(valid);
+    }
+
+    std::string class_name;
+    if (try_get_entity_string(entity, "GetClass", class_name)) {
+      summary["class"] = picojson::value(class_name);
+    }
+
+    std::string model_name;
+    if (try_get_entity_string(entity, "GetModel", model_name)) {
+      summary["model"] = picojson::value(model_name);
+    }
+
+    picojson::array position{picojson::value(0.0), picojson::value(0.0),
+                             picojson::value(0.0)};
+    if (try_get_entity_triplet(entity, "GetPos", "x", "y", "z", position)) {
+      summary["pos"] = picojson::value(position);
+    }
+
+    picojson::array angles{picojson::value(0.0), picojson::value(0.0),
+                           picojson::value(0.0)};
+    if (!try_get_entity_triplet(entity, "GetAngles", "p", "y", "r", angles)) {
+      (void)try_get_entity_triplet(entity, "GetAngles", "pitch", "yaw", "roll",
+                                   angles);
+    }
+    summary["angles"] = picojson::value(angles);
+
+    return summary;
+  }
+
+  bool push_table_get_keys(int entity_index) {
+    lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_->GetField(-1, "table");
+    if (!is_type(-1, "table")) {
+      lua_->Pop(2);
+      return false;
+    }
+
+    const int table_lib = abs_index(-1);
+    lua_->GetField(table_lib, "GetKeys");
+    if (!is_type(-1, "function")) {
+      lua_->Pop(3);
+      return false;
+    }
+
+    lua_->Push(entity_index);
+    pcall_checked(1, 1, "table.GetKeys");
+
+    if (!is_type(-1, "table")) {
+      lua_->Pop(3);
+      return false;
+    }
+
+    lua_->Remove(-2);  // Remove table library.
+    lua_->Remove(-2);  // Remove global table.
+    return true;
+  }
+
+  picojson::object read_entity_properties(int entity_index) {
+    picojson::object properties;
+    if (!push_table_get_keys(entity_index)) {
+      return properties;
+    }
+
+    const int keys_table = abs_index(-1);
+    lua_->PushNil();
+
+    int captured = 0;
+    while (lua_->Next(keys_table) != 0) {
+      std::string key;
+      if (is_type(-1, "string")) {
+        key = get_string_or_empty(-1);
+      }
+
+      lua_->Pop(1);  // Pop keys table value (property name).
+
+      if (key.empty()) {
+        continue;
+      }
+
+      lua_->GetField(entity_index, key.c_str());
+      if (is_type(-1, "number")) {
+        properties[key] = picojson::value(lua_->GetNumber(-1));
+        ++captured;
+      } else if (is_type(-1, "string")) {
+        properties[key] = picojson::value(get_string_or_empty(-1));
+        ++captured;
+      } else if (is_type(-1, "bool")) {
+        properties[key] = picojson::value(lua_->GetBool(-1));
+        ++captured;
+      }
+      lua_->Pop(1);
+
+      if (captured >= kMaxDetailProperties) {
+        lua_->Pop(1);  // Pop iterator key before exiting loop.
+        break;
+      }
+    }
+
+    lua_->Pop(1);  // Pop keys table.
+    return properties;
+  }
+
+  bool push_json_primitive(const picojson::value& value) {
+    if (value.is<std::string>()) {
+      lua_->PushString(value.get<std::string>().c_str());
+      return true;
+    }
+
+    if (value.is<double>()) {
+      const double number = value.get<double>();
+      if (!std::isfinite(number)) {
+        return false;
+      }
+      lua_->PushNumber(number);
+      return true;
+    }
+
+    if (value.is<bool>()) {
+      lua_->PushBool(value.get<bool>());
+      return true;
+    }
+
+    return false;
+  }
+
+  bool push_global_constructor_3(const char* name, double a, double b,
+                                 double c) {
+    lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_->GetField(-1, name);
+    if (!is_type(-1, "function")) {
+      lua_->Pop(2);
+      return false;
+    }
+
+    lua_->PushNumber(a);
+    lua_->PushNumber(b);
+    lua_->PushNumber(c);
+    pcall_checked(3, 1, name);
+
+    lua_->Remove(-2);  // Remove global table.
+    return true;
+  }
+
+  static constexpr int kMaxPageLimit = 200;
+  static constexpr int kMaxDetailProperties = 512;
+
+  GarrysMod::Lua::ILuaBase* lua_;
+  int last_total_;
+};

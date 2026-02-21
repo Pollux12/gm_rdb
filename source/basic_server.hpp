@@ -26,6 +26,7 @@
 
 #include "console_adapter_logging.hpp"
 #include "console_adapter_spew.hpp"
+#include "entity_query.hpp"
 #include "error_aggregator.hpp"
 
 #define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
@@ -68,6 +69,7 @@ class basic_server {
         disposed_(false),
         has_active_connection_(false),
         pending_pause_on_error_(false),
+        lua_base_(nullptr),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
   }
@@ -76,11 +78,13 @@ class basic_server {
 
   /// @brief attach (or detach) for debug target
   /// @param lua_State*  debug target
-  void reset(lua_State* L = nullptr) {
+  void reset(lua_State* L = nullptr,
+             GarrysMod::Lua::ILuaBase* lua_base = nullptr) {
     attached_ = L != nullptr;
     disposed_ = false;
     pending_pause_on_error_.store(false);
     error_aggregator_.clear();
+    lua_base_ = L == nullptr ? nullptr : lua_base;
     debugger_.reset(L);
     if (!L) {
       wait_for_connect_ = true;
@@ -104,6 +108,7 @@ class basic_server {
     wait_for_connect_ = true;
     pending_pause_on_error_.store(false);
     error_aggregator_.clear();
+    lua_base_ = nullptr;
     console_adapter_.set_callback(nullptr);
     debugger_.reset(nullptr);
     debugger_.unpause();
@@ -313,6 +318,30 @@ class basic_server {
     return static_cast<double>(out) == number;
   }
 
+  bool try_parse_finite_number(const json::value& value, double& out) {
+    if (!value.is<double>()) {
+      return false;
+    }
+    out = value.get<double>();
+    return std::isfinite(out);
+  }
+
+  bool try_parse_triplet(const json::value& value, double& first, double& second,
+                         double& third) {
+    if (!value.is<json::array>()) {
+      return false;
+    }
+
+    const json::array& values = value.get<json::array>();
+    if (values.size() != 3) {
+      return false;
+    }
+
+    return try_parse_finite_number(values[0], first) &&
+           try_parse_finite_number(values[1], second) &&
+           try_parse_finite_number(values[2], third);
+  }
+
   bool try_parse_depth(const json::value& param, int& depth) {
     if (!param.is<json::object>() || !param.contains("depth")) {
       depth = 1;
@@ -351,6 +380,19 @@ class basic_server {
     set_structured_error(response, lrdb::response_error::InvalidRequest,
                          "debugger is not paused", method,
                          error_data("request", "state", "running"));
+    return false;
+  }
+
+  bool ensure_lua_interface(lrdb::response_message& response,
+                            const std::string& method) {
+    if (lua_base_ != nullptr) {
+      return true;
+    }
+
+    set_structured_error(response, lrdb::response_error::InternalError,
+                         "lua interface unavailable", method,
+                         error_data("session", "state",
+                                    "lua_interface_unavailable"));
     return false;
   }
 
@@ -715,6 +757,229 @@ class basic_server {
     return send_response(response);
   }
 
+  bool get_entities_request(lrdb::response_message& response,
+                            const json::value& param) {
+    if (!ensure_attached(response, "get_entities") ||
+        !ensure_lua_interface(response, "get_entities")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::null>() && !param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entities",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    int offset = 0;
+    int limit = kDefaultEntityListLimit;
+    int filter_id = 0;
+    std::string filter_class;
+
+    if (param.is<json::object>()) {
+      const json::object& params = param.get<json::object>();
+
+      if (params.contains("offset") &&
+          !try_parse_non_negative_int(params.at("offset"), offset)) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "get_entities",
+                             error_data("request", "offset"));
+        return send_response(response);
+      }
+
+      if (params.contains("limit") &&
+          !try_parse_non_negative_int(params.at("limit"), limit)) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "get_entities",
+                             error_data("request", "limit"));
+        return send_response(response);
+      }
+
+      if (params.contains("filter_id") &&
+          !try_parse_non_negative_int(params.at("filter_id"), filter_id)) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "get_entities",
+                             error_data("request", "filter_id"));
+        return send_response(response);
+      }
+
+      if (params.contains("filter_class")) {
+        if (!params.at("filter_class").is<std::string>()) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "get_entities",
+                               error_data("request", "filter_class"));
+          return send_response(response);
+        }
+        filter_class = params.at("filter_class").get<std::string>();
+      }
+    }
+
+    if (limit > kMaxEntityListLimit) {
+      limit = kMaxEntityListLimit;
+    }
+
+    EntityQuery entity_query(lua_base_);
+    json::array entities;
+
+    try {
+      entities = entity_query.list_entities(offset, limit, filter_id, filter_class);
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity query failed", "get_entities",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    json::object result;
+    result["entities"] = json::value(entities);
+    result["total"] =
+        json::value(static_cast<double>(entity_query.last_total()));
+    result["offset"] = json::value(static_cast<double>(offset));
+    result["limit"] = json::value(static_cast<double>(limit));
+    response.result = json::value(result);
+    return send_response(response);
+  }
+
+  bool get_entity_request(lrdb::response_message& response,
+                          const json::value& param) {
+    if (!ensure_attached(response, "get_entity") ||
+        !ensure_lua_interface(response, "get_entity")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (!params.contains("index") ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    EntityQuery entity_query(lua_base_);
+    try {
+      response.result = json::value(entity_query.get_entity_detail(entity_index));
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity query failed", "get_entity",
+                           error_data("request", "lua", ex.what()));
+    }
+
+    return send_response(response);
+  }
+
+  bool set_entity_property_request(lrdb::response_message& response,
+                                   const json::value& param) {
+    if (!ensure_attached(response, "set_entity_property") ||
+        !ensure_lua_interface(response, "set_entity_property")) {
+      return send_response(response);
+    }
+
+    if (!debugger_.paused()) {
+      set_structured_error(
+          response, -32001,
+          "Entity modification requires debugger to be paused",
+          "set_entity_property", error_data("request", "state", "running"));
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_property",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (!params.contains("index") ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_property",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    if (!params.contains("property") ||
+        !params.at("property").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_property",
+                           error_data("request", "property"));
+      return send_response(response);
+    }
+
+    if (!params.contains("value")) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_property",
+                           error_data("request", "value"));
+      return send_response(response);
+    }
+
+    const std::string property_name = params.at("property").get<std::string>();
+    const json::value& property_value = params.at("value");
+
+    EntityQuery entity_query(lua_base_);
+    bool updated = false;
+
+    try {
+      if (property_name == "pos") {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+        if (!try_parse_triplet(property_value, x, y, z)) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "set_entity_property",
+                               error_data("request", "pos"));
+          return send_response(response);
+        }
+        updated = entity_query.set_entity_pos(entity_index, x, y, z);
+      } else if (property_name == "angles") {
+        double pitch = 0.0;
+        double yaw = 0.0;
+        double roll = 0.0;
+        if (!try_parse_triplet(property_value, pitch, yaw, roll)) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "set_entity_property",
+                               error_data("request", "angles"));
+          return send_response(response);
+        }
+        updated = entity_query.set_entity_angles(entity_index, pitch, yaw, roll);
+      } else {
+        updated =
+            entity_query.set_entity_field(entity_index, property_name, property_value);
+      }
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity modification failed", "set_entity_property",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    if (!updated) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "entity update failed", "set_entity_property",
+                           error_data("request", "entity"));
+      return send_response(response);
+    }
+
+    json::object result;
+    result["ok"] = json::value(true);
+    result["index"] = json::value(static_cast<double>(entity_index));
+    result["property"] = json::value(property_name);
+    response.result = json::value(result);
+    return send_response(response);
+  }
+
   static std::string trim_copy(const std::string& value) {
     size_t begin = 0;
     while (begin < value.size() &&
@@ -918,6 +1183,9 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(eval),
         LRDB_DEBUG_COMMAND_TABLE(get_global),
         LRDB_DEBUG_COMMAND_TABLE(get_metrics),
+        LRDB_DEBUG_COMMAND_TABLE(get_entities),
+        LRDB_DEBUG_COMMAND_TABLE(get_entity),
+        LRDB_DEBUG_COMMAND_TABLE(set_entity_property),
         LRDB_DEBUG_COMMAND_TABLE(command),
         LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
 #undef LRDB_DEBUG_COMMAND_TABLE
@@ -961,6 +1229,8 @@ class basic_server {
   }
   static constexpr int kConnectionWaitTimeoutMs = 100;
   static constexpr int kMaxObjectDepth = 8;
+  static constexpr int kDefaultEntityListLimit = 50;
+  static constexpr int kMaxEntityListLimit = 200;
   static constexpr size_t kMaxEvalChunkBytes = 16 * 1024;
   static constexpr size_t kMaxConsoleCommandBytes = 2048;
   static constexpr size_t kMaxConsoleCommandNameBytes = 128;
@@ -970,6 +1240,7 @@ class basic_server {
   bool disposed_;
   bool has_active_connection_;
   std::atomic_bool pending_pause_on_error_;
+  GarrysMod::Lua::ILuaBase* lua_base_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};
     std::atomic<uint64_t> connections_closed{0};

@@ -28,7 +28,7 @@ namespace rdb
 
 		active_server = *server;
 
-		( *server )->reset( LUA->GetState( ) );
+		( *server )->reset( LUA->GetState( ), LUA );
 		return 0;
 	}
 
