@@ -343,7 +343,8 @@ class basic_server {
   }
 
   bool try_parse_depth(const json::value& param, int& depth) {
-    if (!param.is<json::object>() || !param.contains("depth")) {
+    if (!param.is<json::object>() ||
+      param.get<json::object>().count("depth") == 0) {
       depth = 1;
       return true;
     }
@@ -357,7 +358,8 @@ class basic_server {
   }
 
   bool try_parse_stack_no(const json::value& param, int& stack_no) {
-    if (!param.is<json::object>() || !param.contains("stack_no")) {
+    if (!param.is<json::object>() ||
+      param.get<json::object>().count("stack_no") == 0) {
       return false;
     }
     return try_parse_non_negative_int(param.get("stack_no"), stack_no);
@@ -575,7 +577,8 @@ class basic_server {
     bool has_source = param.get("file").is<std::string>();
     int line = -1;
     bool has_line = try_parse_non_negative_int(param.get("line"), line);
-    if (param.is<json::object>() && param.contains("line") && !has_line) {
+    if (param.is<json::object>() && param.get<json::object>().count("line") > 0 &&
+      !has_line) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
                            "invalid params", "clear_breakpoints",
                            error_data("request", "line"));
@@ -779,7 +782,7 @@ class basic_server {
     if (param.is<json::object>()) {
       const json::object& params = param.get<json::object>();
 
-      if (params.contains("offset") &&
+        if (params.count("offset") > 0 &&
           !try_parse_non_negative_int(params.at("offset"), offset)) {
         set_structured_error(response, lrdb::response_error::InvalidParams,
                              "invalid params", "get_entities",
@@ -787,7 +790,7 @@ class basic_server {
         return send_response(response);
       }
 
-      if (params.contains("limit") &&
+        if (params.count("limit") > 0 &&
           !try_parse_non_negative_int(params.at("limit"), limit)) {
         set_structured_error(response, lrdb::response_error::InvalidParams,
                              "invalid params", "get_entities",
@@ -795,7 +798,7 @@ class basic_server {
         return send_response(response);
       }
 
-      if (params.contains("filter_id") &&
+        if (params.count("filter_id") > 0 &&
           !try_parse_non_negative_int(params.at("filter_id"), filter_id)) {
         set_structured_error(response, lrdb::response_error::InvalidParams,
                              "invalid params", "get_entities",
@@ -803,7 +806,7 @@ class basic_server {
         return send_response(response);
       }
 
-      if (params.contains("filter_class")) {
+      if (params.count("filter_class") > 0) {
         if (!params.at("filter_class").is<std::string>()) {
           set_structured_error(response, lrdb::response_error::InvalidParams,
                                "invalid params", "get_entities",
@@ -856,7 +859,7 @@ class basic_server {
 
     const json::object& params = param.get<json::object>();
     int entity_index = 0;
-    if (!params.contains("index") ||
+    if (params.count("index") == 0 ||
         !try_parse_non_negative_int(params.at("index"), entity_index) ||
         entity_index <= 0) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
@@ -901,7 +904,7 @@ class basic_server {
 
     const json::object& params = param.get<json::object>();
     int entity_index = 0;
-    if (!params.contains("index") ||
+    if (params.count("index") == 0 ||
         !try_parse_non_negative_int(params.at("index"), entity_index) ||
         entity_index <= 0) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
@@ -910,7 +913,7 @@ class basic_server {
       return send_response(response);
     }
 
-    if (!params.contains("property") ||
+    if (params.count("property") == 0 ||
         !params.at("property").is<std::string>()) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
                            "invalid params", "set_entity_property",
@@ -918,7 +921,7 @@ class basic_server {
       return send_response(response);
     }
 
-    if (!params.contains("value")) {
+    if (params.count("value") == 0) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
                            "invalid params", "set_entity_property",
                            error_data("request", "value"));
@@ -1039,7 +1042,8 @@ class basic_server {
 
   bool try_extract_lua_error_message(const json::value& message,
                                      std::string& out_message) const {
-    if (!message.is<json::object>() || !message.contains("message") ||
+    if (!message.is<json::object>() ||
+      message.get<json::object>().count("message") == 0 ||
         !message.get("message").is<std::string>()) {
       return false;
     }
