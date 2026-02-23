@@ -48,23 +48,34 @@ bool console_adapter::run_command( const std::string &command, std::string &erro
 		return false;
 	}
 
+	std::string command_text = command;
+	if( command_text.back( ) != '\n' )
+		command_text.push_back( '\n' );
+
 #if IS_SERVERSIDE
+	if( m_engine_server == nullptr )
+		m_engine_server = InterfacePointers::VEngineServer( );
+
 	if( m_engine_server == nullptr )
 	{
 		error_message = "engine server interface unavailable";
 		return false;
 	}
 
-	m_engine_server->ServerCommand( command.c_str( ) );
+	m_engine_server->ServerCommand( command_text.c_str( ) );
+	m_engine_server->ServerExecute( );
 
 #else
+	if( m_engine_client == nullptr )
+		m_engine_client = InterfacePointers::VEngineClient( );
+
 	if( m_engine_client == nullptr )
 	{
 		error_message = "engine client interface unavailable";
 		return false;
 	}
 
-	m_engine_client->ClientCmd_Unrestricted( command.c_str( ) );
+	m_engine_client->ClientCmd_Unrestricted( command_text.c_str( ) );
 
 #endif
 
