@@ -27,6 +27,7 @@
 #include "console_adapter_logging.hpp"
 #include "console_adapter_spew.hpp"
 #include "entity_query.hpp"
+#include "entity_snapshot.hpp"
 #include "error_aggregator.hpp"
 
 #define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
@@ -69,6 +70,7 @@ class basic_server {
         disposed_(false),
         has_active_connection_(false),
         pending_pause_on_error_(false),
+        stop_on_error_(false),
         lua_base_(nullptr),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
@@ -83,6 +85,7 @@ class basic_server {
     attached_ = L != nullptr;
     disposed_ = false;
     pending_pause_on_error_.store(false);
+    stop_on_error_ = false;
     error_aggregator_.clear();
     lua_base_ = L == nullptr ? nullptr : lua_base;
     debugger_.reset(L);
@@ -192,6 +195,12 @@ class basic_server {
 
     param["lua"] = json::value(lua);
     send_notify(lrdb::notify_message("connected", json::value(param)));
+
+    // If the debugger is already paused when a client connects, re-announce
+    // the paused state so the adapter can correctly show pause UI.
+    if (debugger_.paused()) {
+      send_pause_status();
+    }
   }
 
   bool send_message(const std::string& message) {
@@ -759,8 +768,7 @@ class basic_server {
 
   bool get_entities_request(lrdb::response_message& response,
                             const json::value& param) {
-    if (!ensure_attached(response, "get_entities") ||
-        !ensure_lua_interface(response, "get_entities")) {
+    if (!ensure_attached(response, "get_entities")) {
       return send_response(response);
     }
 
@@ -818,17 +826,10 @@ class basic_server {
       limit = kMaxEntityListLimit;
     }
 
-    EntityQuery entity_query(lua_base_);
+    EntitySnapshotQuery entity_query;
     json::array entities;
-
-    try {
-      entities = entity_query.list_entities(offset, limit, filter_id, filter_class);
-    } catch (const std::exception& ex) {
-      set_structured_error(response, lrdb::response_error::InternalError,
-                           "entity query failed", "get_entities",
-                           error_data("request", "lua", ex.what()));
-      return send_response(response);
-    }
+    entities =
+        entity_query.list_entities(offset, limit, filter_id, filter_class);
 
     json::object result;
     result["entities"] = json::value(entities);
@@ -842,8 +843,7 @@ class basic_server {
 
   bool get_entity_request(lrdb::response_message& response,
                           const json::value& param) {
-    if (!ensure_attached(response, "get_entity") ||
-        !ensure_lua_interface(response, "get_entity")) {
+    if (!ensure_attached(response, "get_entity")) {
       return send_response(response);
     }
 
@@ -865,14 +865,8 @@ class basic_server {
       return send_response(response);
     }
 
-    EntityQuery entity_query(lua_base_);
-    try {
-      response.result = json::value(entity_query.get_entity_detail(entity_index));
-    } catch (const std::exception& ex) {
-      set_structured_error(response, lrdb::response_error::InternalError,
-                           "entity query failed", "get_entity",
-                           error_data("request", "lua", ex.what()));
-    }
+    EntitySnapshotQuery entity_query;
+    response.result = json::value(entity_query.get_entity_detail(entity_index));
 
     return send_response(response);
   }
@@ -1000,9 +994,9 @@ class basic_server {
                                               std::string& out_message) {
     static const std::regex kStackTraceRegex(R"(stack traceback:)",
                                              std::regex::icase);
-    static const std::regex kStackFrameRegex(R"(^\d+\.\s+)");
+    static const std::regex kStackFrameRegex(R"(^\s*\d+\.\s+)");
     static const std::regex kLuaPathErrorRegex(
-        R"(^\s*(?:[A-Za-z]:)?@?(?:[^:\r\n]*[\\/])?[^:\r\n]*\.lua:\d+:\s*(.+?)\s*$)",
+      R"(^\s*(?:\[[^\]\r\n]+\]\s*)?(?:[A-Za-z]:)?@?(?:[^:\r\n]*[\\/])?[^:\r\n]*\.lua:\d+:\s*(.+?)\s*$)",
         std::regex::icase);
 
     std::string trimmed = trim_copy(line);
@@ -1045,15 +1039,44 @@ class basic_server {
       return false;
     }
 
-    return try_extract_lua_error_from_line(
-        message.get("message").get<std::string>(), out_message);
+    const std::string raw_message = message.get("message").get<std::string>();
+    if (try_extract_lua_error_from_line(raw_message, out_message)) {
+      return true;
+    }
+
+    size_t line_start = 0;
+    while (line_start <= raw_message.size()) {
+      size_t line_end = raw_message.find_first_of("\r\n", line_start);
+      const std::string line =
+          line_end == std::string::npos
+              ? raw_message.substr(line_start)
+              : raw_message.substr(line_start, line_end - line_start);
+
+      if (try_extract_lua_error_from_line(line, out_message)) {
+        return true;
+      }
+
+      if (line_end == std::string::npos) {
+        break;
+      }
+
+      line_start = line_end + 1;
+      if (line_start < raw_message.size() && raw_message[line_end] == '\r' &&
+          raw_message[line_start] == '\n') {
+        ++line_start;
+      }
+    }
+
+    return false;
   }
 
   void emit_error_notification(const std::string& message,
+                               const std::string& raw_message,
                                const std::string& fingerprint,
                                int count) {
     json::object param;
     param["message"] = json::value(message);
+    param["raw_message"] = json::value(raw_message);
     param["fingerprint"] = json::value(fingerprint);
     param["count"] = json::value(static_cast<double>(count));
     param["source"] = json::value("lua");
@@ -1068,12 +1091,20 @@ class basic_server {
       return;
     }
 
+    std::string raw_lua_error = lua_error;
+    if (message.is<json::object>() &&
+        message.get<json::object>().count("message") > 0 &&
+        message.get("message").is<std::string>()) {
+      raw_lua_error = message.get("message").get<std::string>();
+    }
+
     const auto aggregated = error_aggregator_.add_error(lua_error);
-    emit_error_notification(lua_error, aggregated.first, aggregated.second);
+    emit_error_notification(lua_error, raw_lua_error, aggregated.first,
+                            aggregated.second);
 
     // Pause requests are queued and fulfilled from debugger tick context to
     // avoid touching debugger state from console callback threads.
-    if (attached_ && !disposed_) {
+    if (attached_ && !disposed_ && stop_on_error_) {
       pending_pause_on_error_.store(true);
     }
   }
@@ -1134,15 +1165,125 @@ class basic_server {
       return send_response(response);
     }
 
-    std::string dispatch_error;
-    if (!console_adapter_.run_command(command, dispatch_error)) {
-      set_structured_error(
-          response, lrdb::response_error::InternalError,
-          "failed to execute command", "command",
-          error_data("request", "command",
-                     dispatch_error.empty() ? "unknown command dispatch error"
-                                            : dispatch_error));
+    auto run_console_fallback = [&](const std::string& reason) {
+      std::string dispatch_error;
+      if (console_adapter_.run_command(command, dispatch_error)) {
+        return true;
+      }
+
+      std::string detail = reason;
+      if (!dispatch_error.empty()) {
+        detail += "; fallback dispatch failed: " + dispatch_error;
+      }
+
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "failed to execute command", "command",
+                           error_data("request", "command", detail));
+      return false;
+    };
+
+    if (lua_base_ == nullptr) {
+      if (!run_console_fallback("lua interface unavailable")) {
+        return send_response(response);
+      }
       return send_response(response);
+    }
+
+    // Use Lua game.ConsoleCommand for reliable command execution in GMod.
+    // This avoids engine interface timing issues when called from a debug hook.
+    std::string command_text = command;
+    if (command_text.empty() || command_text.back() != '\n') {
+      command_text.push_back('\n');
+    }
+
+    const int stack_top = lua_base_->Top();
+
+    lua_base_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_base_->GetField(-1, "game");
+
+    bool is_game_table =
+        lua_base_->IsType(-1, GarrysMod::Lua::Type::Table);
+    if (!is_game_table) {
+      lua_base_->Pop(lua_base_->Top() - stack_top);
+      if (!run_console_fallback("game table not found")) {
+        return send_response(response);
+      }
+      return send_response(response);
+    }
+
+    lua_base_->GetField(-1, "ConsoleCommand");
+
+    bool is_function =
+        lua_base_->IsType(-1, GarrysMod::Lua::Type::Function);
+    if (!is_function) {
+      lua_base_->Pop(lua_base_->Top() - stack_top);
+      if (!run_console_fallback("game.ConsoleCommand not found")) {
+        return send_response(response);
+      }
+      return send_response(response);
+    }
+
+    lua_base_->PushString(command_text.c_str());
+    int pcall_result = lua_base_->PCall(1, 0, 0);
+
+    if (pcall_result != 0) {
+      const char* err_str = lua_base_->GetString(-1);
+      std::string err_msg =
+          err_str != nullptr ? std::string(err_str) : "unknown lua error";
+      lua_base_->Pop(1);  // Pop error message.
+      lua_base_->Pop(lua_base_->Top() - stack_top);
+      if (!run_console_fallback("game.ConsoleCommand runtime error: " +
+                                err_msg)) {
+        return send_response(response);
+      }
+      return send_response(response);
+    }
+
+    // Clean up game table and global table.
+    lua_base_->Pop(lua_base_->Top() - stack_top);
+    return send_response(response);
+  }
+
+  bool init_request(lrdb::response_message& response,
+                    const json::value& param) {
+    if (!param.is<json::null>() && !param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "init",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    if (param.is<json::object>()) {
+      const json::object& params = param.get<json::object>();
+
+      if (params.count("protocol_version") > 0) {
+        if (!params.at("protocol_version").is<std::string>()) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "init",
+                               error_data("request", "protocol_version"));
+          return send_response(response);
+        }
+
+        const std::string protocol_version =
+            params.at("protocol_version").get<std::string>();
+        if (protocol_version != LRDB_SERVER_PROTOCOL_VERSION) {
+          json::object result;
+          result["warning"] = json::value("protocol_version mismatch");
+          result["server_protocol_version"] =
+              json::value(LRDB_SERVER_PROTOCOL_VERSION);
+          response.result = json::value(result);
+        }
+      }
+
+      if (params.count("stop_on_error") > 0) {
+        if (!params.at("stop_on_error").is<bool>()) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "init",
+                               error_data("request", "stop_on_error"));
+          return send_response(response);
+        }
+        stop_on_error_ = params.at("stop_on_error").get<bool>();
+      }
     }
 
     return send_response(response);
@@ -1169,6 +1310,7 @@ class basic_server {
 
     static const std::map<std::string, exec_cmd_fn> cmd_map = {
 #define LRDB_DEBUG_COMMAND_TABLE(NAME) {#NAME, &basic_server::NAME##_request}
+        LRDB_DEBUG_COMMAND_TABLE(init),
         LRDB_DEBUG_COMMAND_TABLE(step),
         LRDB_DEBUG_COMMAND_TABLE(step_in),
         LRDB_DEBUG_COMMAND_TABLE(step_out),
@@ -1228,7 +1370,9 @@ class basic_server {
       send_response(response);
     }
   }
-  static constexpr int kConnectionWaitTimeoutMs = 100;
+  // Zero means one non-blocking ASIO poll per Lua line when waiting for a client;
+  // avoids freezing the game while no debugger is connected.
+  static constexpr int kConnectionWaitTimeoutMs = 0;
   static constexpr int kMaxObjectDepth = 8;
   static constexpr int kDefaultEntityListLimit = 50;
   static constexpr int kMaxEntityListLimit = 200;
@@ -1241,6 +1385,7 @@ class basic_server {
   bool disposed_;
   bool has_active_connection_;
   std::atomic_bool pending_pause_on_error_;
+  bool stop_on_error_;
   GarrysMod::Lua::ILuaBase* lua_base_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};

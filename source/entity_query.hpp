@@ -37,6 +37,9 @@ class EntityQuery {
       if (!push_entity_by_index(filter_id)) {
         return entities;
       }
+      if (!lua_->IsType(-1, GarrysMod::Lua::Type::Entity)) {
+        return entities;
+      }
       picojson::object summary = build_entity_summary(-1);
       if (matches_class_filter(summary, filter_class)) {
         last_total_ = 1;
@@ -57,8 +60,7 @@ class EntityQuery {
       return entities;
     }
 
-    lua_->Push(ents_table);
-    pcall_checked(1, 1, "ents.GetAll");
+    pcall_checked(0, 1, "ents.GetAll");
 
     if (!is_type(-1, "table")) {
       return entities;
@@ -69,6 +71,12 @@ class EntityQuery {
 
     int matched = 0;
     while (lua_->Next(all_entities) != 0) {
+      // Skip non-entity values in the table.
+      if (!lua_->IsType(-1, GarrysMod::Lua::Type::Entity)) {
+        lua_->Pop(1);
+        continue;
+      }
+
       const picojson::object summary = build_entity_summary(-1);
       lua_->Pop(1);  // Pop entity value, keep iterator key.
 
@@ -105,14 +113,19 @@ class EntityQuery {
 
     double parent_index = 0.0;
     bool has_parent = false;
-    if (invoke_entity_method(entity, "GetParent", 0, 1)) {
-      const int parent = abs_index(-1);
-      bool parent_valid = false;
-      try_get_entity_bool(parent, "IsValid", parent_valid);
-      if (parent_valid && try_get_entity_number(parent, "EntIndex", parent_index)) {
-        has_parent = true;
+    try {
+      if (invoke_entity_method(entity, "GetParent", 0, 1)) {
+        const int parent = abs_index(-1);
+        bool parent_valid = false;
+        try_get_entity_bool(parent, "IsValid", parent_valid);
+        if (parent_valid &&
+            try_get_entity_number(parent, "EntIndex", parent_index)) {
+          has_parent = true;
+        }
+        lua_->Pop(1);
       }
-      lua_->Pop(1);
+    } catch (const std::exception&) {
+      has_parent = false;
     }
 
     detail["parent_index"] =
@@ -123,7 +136,11 @@ class EntityQuery {
       detail["health"] = picojson::value(health);
     }
 
-    detail["properties"] = picojson::value(read_entity_properties(entity));
+    try {
+      detail["properties"] = picojson::value(read_entity_properties(entity));
+    } catch (const std::exception&) {
+      detail["properties"] = picojson::value(picojson::object());
+    }
     return detail;
   }
 
@@ -176,9 +193,12 @@ class EntityQuery {
     }
 
     lua_->Push(entity);
-    if (!push_global_constructor_3("Vector", x, y, z)) {
-      return false;
-    }
+
+    Vector vec;
+    vec.x = static_cast<float>(x);
+    vec.y = static_cast<float>(y);
+    vec.z = static_cast<float>(z);
+    lua_->PushVector(vec);
 
     pcall_checked(2, 0, "Entity:SetPos");
     return true;
@@ -208,9 +228,12 @@ class EntityQuery {
     }
 
     lua_->Push(entity);
-    if (!push_global_constructor_3("Angle", pitch, yaw, roll)) {
-      return false;
-    }
+
+    QAngle ang;
+    ang.x = static_cast<float>(pitch);
+    ang.y = static_cast<float>(yaw);
+    ang.z = static_cast<float>(roll);
+    lua_->PushAngle(ang);
 
     pcall_checked(2, 0, "Entity:SetAngles");
     return true;
@@ -348,92 +371,108 @@ class EntityQuery {
 
   bool try_get_entity_number(int entity_index, const char* method_name,
                              double& out) {
-    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
-      return false;
-    }
+    try {
+      if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+        return false;
+      }
 
-    if (!is_type(-1, "number")) {
+      if (!is_type(-1, "number")) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      out = lua_->GetNumber(-1);
       lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
       return false;
     }
-
-    out = lua_->GetNumber(-1);
-    lua_->Pop(1);
-    return true;
   }
 
   bool try_get_entity_bool(int entity_index, const char* method_name,
                            bool& out) {
-    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
-      return false;
-    }
+    try {
+      if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+        return false;
+      }
 
-    if (!is_type(-1, "bool")) {
+      if (!is_type(-1, "bool")) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      out = lua_->GetBool(-1);
       lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
       return false;
     }
-
-    out = lua_->GetBool(-1);
-    lua_->Pop(1);
-    return true;
   }
 
   bool try_get_entity_string(int entity_index, const char* method_name,
                              std::string& out) {
-    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
-      return false;
-    }
+    try {
+      if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+        return false;
+      }
 
-    if (!is_type(-1, "string")) {
+      if (!is_type(-1, "string")) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      out = get_string_or_empty(-1);
       lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
       return false;
     }
-
-    out = get_string_or_empty(-1);
-    lua_->Pop(1);
-    return true;
   }
 
-  bool try_get_numeric_field(int object_index, const char* field_name,
-                             double& out) {
-    lua_->GetField(object_index, field_name);
-    if (!is_type(-1, "number")) {
+  bool try_get_entity_vector(int entity_index, const char* method_name,
+                            picojson::array& out) {
+    try {
+      if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+        return false;
+      }
+
+      if (!lua_->IsType(-1, GarrysMod::Lua::Type::Vector)) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      const Vector& vec = lua_->GetVector(-1);
+      out = {picojson::value(static_cast<double>(vec.x)),
+             picojson::value(static_cast<double>(vec.y)),
+             picojson::value(static_cast<double>(vec.z))};
       lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
       return false;
     }
-
-    out = lua_->GetNumber(-1);
-    lua_->Pop(1);
-    return true;
   }
 
-  bool try_read_triplet(int object_index, const char* first, const char* second,
-                        const char* third, picojson::array& out) {
-    double a = 0.0;
-    double b = 0.0;
-    double c = 0.0;
+  bool try_get_entity_angle(int entity_index, const char* method_name,
+                            picojson::array& out) {
+    try {
+      if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
+        return false;
+      }
 
-    if (!try_get_numeric_field(object_index, first, a) ||
-        !try_get_numeric_field(object_index, second, b) ||
-        !try_get_numeric_field(object_index, third, c)) {
+      if (!lua_->IsType(-1, GarrysMod::Lua::Type::Angle)) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      const QAngle& ang = lua_->GetAngle(-1);
+      out = {picojson::value(static_cast<double>(ang.x)),
+             picojson::value(static_cast<double>(ang.y)),
+             picojson::value(static_cast<double>(ang.z))};
+      lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
       return false;
     }
-
-    out = {picojson::value(a), picojson::value(b), picojson::value(c)};
-    return true;
-  }
-
-  bool try_get_entity_triplet(int entity_index, const char* method_name,
-                              const char* first, const char* second,
-                              const char* third, picojson::array& out) {
-    if (!invoke_entity_method(entity_index, method_name, 0, 1)) {
-      return false;
-    }
-
-    const int object_index = abs_index(-1);
-    const bool parsed = try_read_triplet(object_index, first, second, third, out);
-    lua_->Pop(1);
-    return parsed;
   }
 
   static std::string read_class_name(const picojson::object& summary) {
@@ -469,6 +508,11 @@ class EntityQuery {
         picojson::array{picojson::value(0.0), picojson::value(0.0),
                         picojson::value(0.0)});
 
+    // Verify this is actually an Entity type before calling methods on it.
+    if (!lua_->IsType(entity, GarrysMod::Lua::Type::Entity)) {
+      return summary;
+    }
+
     double ent_index = 0.0;
     if (try_get_entity_number(entity, "EntIndex", ent_index)) {
       summary["index"] = picojson::value(ent_index);
@@ -477,6 +521,11 @@ class EntityQuery {
     bool valid = false;
     if (try_get_entity_bool(entity, "IsValid", valid)) {
       summary["valid"] = picojson::value(valid);
+    }
+
+    // Skip expensive method calls for invalid entities.
+    if (!valid) {
+      return summary;
     }
 
     std::string class_name;
@@ -491,22 +540,24 @@ class EntityQuery {
 
     picojson::array position{picojson::value(0.0), picojson::value(0.0),
                              picojson::value(0.0)};
-    if (try_get_entity_triplet(entity, "GetPos", "x", "y", "z", position)) {
+    if (try_get_entity_vector(entity, "GetPos", position)) {
       summary["pos"] = picojson::value(position);
     }
 
     picojson::array angles{picojson::value(0.0), picojson::value(0.0),
                            picojson::value(0.0)};
-    if (!try_get_entity_triplet(entity, "GetAngles", "p", "y", "r", angles)) {
-      (void)try_get_entity_triplet(entity, "GetAngles", "pitch", "yaw", "roll",
-                                   angles);
+    if (try_get_entity_angle(entity, "GetAngles", angles)) {
+      summary["angles"] = picojson::value(angles);
     }
-    summary["angles"] = picojson::value(angles);
 
     return summary;
   }
 
   bool push_table_get_keys(int entity_index) {
+    if (!is_type(entity_index, "table")) {
+      return false;
+    }
+
     lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
     lua_->GetField(-1, "table");
     if (!is_type(-1, "table")) {
@@ -600,24 +651,6 @@ class EntityQuery {
     }
 
     return false;
-  }
-
-  bool push_global_constructor_3(const char* name, double a, double b,
-                                 double c) {
-    lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-    lua_->GetField(-1, name);
-    if (!is_type(-1, "function")) {
-      lua_->Pop(2);
-      return false;
-    }
-
-    lua_->PushNumber(a);
-    lua_->PushNumber(b);
-    lua_->PushNumber(c);
-    pcall_checked(3, 1, name);
-
-    lua_->Remove(-2);  // Remove global table.
-    return true;
   }
 
   static constexpr int kMaxPageLimit = 200;
