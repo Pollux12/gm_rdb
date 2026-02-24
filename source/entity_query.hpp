@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -136,12 +137,167 @@ class EntityQuery {
       detail["health"] = picojson::value(health);
     }
 
-    try {
-      detail["properties"] = picojson::value(read_entity_properties(entity));
-    } catch (const std::exception&) {
-      detail["properties"] = picojson::value(picojson::object());
-    }
+    // Entity:GetTable() values are loaded lazily by get_entity_table.
+    detail["properties"] = picojson::value(picojson::object());
     return detail;
+  }
+
+  picojson::array get_entity_table_entries(int entity_index,
+                                           const std::string& filter) {
+    picojson::array entries;
+    if (entity_index <= 0 || lua_ == nullptr) {
+      return entries;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return entries;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return entries;
+    }
+
+    if (!invoke_entity_method(entity, "GetTable", 0, 1)) {
+      return entries;
+    }
+
+    if (!is_type(-1, "table")) {
+      lua_->Pop(1);
+      return entries;
+    }
+
+    const int table_index = abs_index(-1);
+    lua_->PushNil();
+
+    int captured = 0;
+    while (lua_->Next(table_index) != 0) {
+      std::string key;
+      if (is_type(-2, "string")) {
+        key = get_string_or_empty(-2);
+      } else if (is_type(-2, "number")) {
+        key = format_number(lua_->GetNumber(-2));
+      }
+
+      if (key.empty()) {
+        lua_->Pop(1);
+        continue;
+      }
+
+      picojson::object entry;
+      if (build_entity_table_entry(key, -1, filter, entry)) {
+        entries.emplace_back(entry);
+        ++captured;
+      }
+
+      lua_->Pop(1);  // Pop table value, keep key for iteration.
+      if (captured >= kMaxEntityTableEntries) {
+        lua_->Pop(1);  // Pop iterator key before exiting loop.
+        break;
+      }
+    }
+
+    lua_->Pop(1);  // Pop Entity:GetTable() result.
+
+    return entries;
+  }
+
+  bool set_entity_table_field(int entity_index, const std::string& field_name,
+                              const picojson::value& field_value) {
+    if (lua_ == nullptr || entity_index <= 0 ||
+        !is_valid_field_name(field_name)) {
+      return false;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
+
+    if (!invoke_entity_method(entity, "GetTable", 0, 1)) {
+      return false;
+    }
+
+    if (!is_type(-1, "table")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    const int table_index = abs_index(-1);
+    if (!push_json_value(field_value)) {
+      return false;
+    }
+
+    lua_->SetField(table_index, field_name.c_str());
+    return true;
+  }
+
+  picojson::array get_entity_network_var_entries(int entity_index) {
+    picojson::array entries;
+    if (entity_index <= 0 || lua_ == nullptr) {
+      return entries;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return entries;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return entries;
+    }
+
+    if (!invoke_entity_method(entity, "GetNetworkVars", 0, 1)) {
+      return entries;
+    }
+
+    if (!is_type(-1, "table")) {
+      lua_->Pop(1);
+      return entries;
+    }
+
+    const int vars_table = abs_index(-1);
+    lua_->PushNil();
+
+    int captured = 0;
+    while (lua_->Next(vars_table) != 0) {
+      std::string key;
+      if (is_type(-2, "string")) {
+        key = get_string_or_empty(-2);
+      } else if (is_type(-2, "number")) {
+        key = format_number(lua_->GetNumber(-2));
+      }
+
+      if (key.empty()) {
+        lua_->Pop(1);
+        continue;
+      }
+
+      picojson::object entry;
+      if (build_entity_table_entry(key, -1, "", entry)) {
+        entries.emplace_back(entry);
+        ++captured;
+      }
+
+      lua_->Pop(1);  // Pop table value, keep key for iteration.
+      if (captured >= kMaxEntityTableEntries) {
+        lua_->Pop(1);  // Pop iterator key before exiting loop.
+        break;
+      }
+    }
+
+    lua_->Pop(1);  // Pop network vars table.
+    return entries;
   }
 
   bool set_entity_field(int entity_index, const std::string& field_name,
@@ -167,6 +323,40 @@ class EntityQuery {
     }
 
     lua_->SetField(entity, field_name.c_str());
+    return true;
+  }
+
+  bool set_entity_network_var(int entity_index, const std::string& var_name,
+                              const picojson::value& field_value) {
+    if (lua_ == nullptr || entity_index <= 0 || !is_valid_field_name(var_name)) {
+      return false;
+    }
+
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
+
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
+
+    const std::string setter = "Set" + var_name;
+    lua_->GetField(entity, setter.c_str());
+    if (!is_type(-1, "function")) {
+      lua_->Pop(1);
+      return false;
+    }
+
+    lua_->Push(entity);
+    if (!push_json_value(field_value)) {
+      lua_->Pop(2);
+      return false;
+    }
+
+    pcall_checked(2, 0, setter.c_str());
     return true;
   }
 
@@ -523,6 +713,92 @@ class EntityQuery {
     }
   }
 
+  static std::string format_number(double value) {
+    if (!std::isfinite(value)) {
+      return "nan";
+    }
+
+    std::ostringstream stream;
+    stream.precision(6);
+    stream << std::fixed << value;
+    std::string formatted = stream.str();
+    while (!formatted.empty() && formatted.back() == '0') {
+      formatted.pop_back();
+    }
+    if (!formatted.empty() && formatted.back() == '.') {
+      formatted.pop_back();
+    }
+    return formatted.empty() ? "0" : formatted;
+  }
+
+  static std::string format_vec3(double x, double y, double z) {
+    return "[" + format_number(x) + ", " + format_number(y) + ", " +
+           format_number(z) + "]";
+  }
+
+  bool build_entity_table_entry(const std::string& key, int value_index,
+                                const std::string& filter,
+                                picojson::object& out_entry) {
+    std::string display;
+    bool editable = false;
+    picojson::value raw_value;
+    bool has_raw_value = false;
+
+    if (is_type(value_index, "number")) {
+      const double number = lua_->GetNumber(value_index);
+      display = format_number(number);
+      if (std::isfinite(number)) {
+        editable = true;
+        raw_value = picojson::value(number);
+        has_raw_value = true;
+      }
+    } else if (is_type(value_index, "string")) {
+      display = get_string_or_empty(value_index);
+      editable = true;
+      raw_value = picojson::value(display);
+      has_raw_value = true;
+    } else if (is_type(value_index, "bool")) {
+      const bool value = lua_->GetBool(value_index);
+      display = value ? "true" : "false";
+      editable = true;
+      raw_value = picojson::value(value);
+      has_raw_value = true;
+    } else if (lua_->IsType(value_index, GarrysMod::Lua::Type::Vector)) {
+      const Vector& vec = lua_->GetVector(value_index);
+      display = format_vec3(vec.x, vec.y, vec.z);
+    } else if (lua_->IsType(value_index, GarrysMod::Lua::Type::Angle)) {
+      const QAngle& ang = lua_->GetAngle(value_index);
+      display = format_vec3(ang.x, ang.y, ang.z);
+    } else if (lua_->IsType(value_index, GarrysMod::Lua::Type::Entity)) {
+      display = "<entity>";
+    } else if (is_type(value_index, "nil")) {
+      display = "nil";
+    } else if (is_type(value_index, "table")) {
+      display = "<table>";
+    } else if (is_type(value_index, "function")) {
+      display = "<function>";
+    } else if (is_type(value_index, "userdata")) {
+      display = "<userdata>";
+    } else if (is_type(value_index, "thread")) {
+      display = "<thread>";
+    } else {
+      display = "<" + std::string(lua_->GetTypeName(lua_->GetType(value_index))) + ">";
+    }
+
+    if (!filter.empty() && !contains_case_insensitive(key, filter) &&
+        !contains_case_insensitive(display, filter)) {
+      return false;
+    }
+
+    out_entry["key"] = picojson::value(key);
+    out_entry["display"] = picojson::value(display);
+    out_entry["editable"] = picojson::value(editable);
+    if (has_raw_value) {
+      out_entry["value"] = raw_value;
+    }
+    return true;
+  }
+
   static std::string read_class_name(const picojson::object& summary) {
     const auto match = summary.find("class");
     if (match == summary.end() || !match->second.is<std::string>()) {
@@ -701,8 +977,39 @@ class EntityQuery {
     return false;
   }
 
+  bool push_json_value(const picojson::value& value) {
+    if (push_json_primitive(value)) {
+      return true;
+    }
+
+    if (value.is<picojson::array>()) {
+      const picojson::array& arr = value.get<picojson::array>();
+      if (arr.size() != 3 || !arr[0].is<double>() || !arr[1].is<double>() ||
+          !arr[2].is<double>()) {
+        return false;
+      }
+
+      const double x = arr[0].get<double>();
+      const double y = arr[1].get<double>();
+      const double z = arr[2].get<double>();
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        return false;
+      }
+
+      Vector vec;
+      vec.x = static_cast<float>(x);
+      vec.y = static_cast<float>(y);
+      vec.z = static_cast<float>(z);
+      lua_->PushVector(vec);
+      return true;
+    }
+
+    return false;
+  }
+
   static constexpr int kMaxPageLimit = 200;
   static constexpr int kMaxDetailProperties = 512;
+  static constexpr int kMaxEntityTableEntries = 2048;
 
   GarrysMod::Lua::ILuaBase* lua_;
   int last_total_;

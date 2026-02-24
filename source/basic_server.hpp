@@ -902,14 +902,199 @@ class basic_server {
     }
 
     if (lua_base_ != nullptr) {
-      EntityQuery entity_query(lua_base_);
-      response.result = json::value(entity_query.get_entity_detail(entity_index));
-      return send_response(response);
+      try {
+        EntityQuery entity_query(lua_base_);
+        response.result =
+          json::value(entity_query.get_entity_detail(entity_index));
+        return send_response(response);
+      } catch (const std::exception& ex) {
+        set_structured_error(response, lrdb::response_error::InternalError,
+                             "entity query failed", "get_entity",
+                             error_data("request", "lua", ex.what()));
+        return send_response(response);
+      }
     }
 
     EntitySnapshotQuery entity_query;
     response.result = json::value(entity_query.get_entity_detail(entity_index));
 
+    return send_response(response);
+  }
+
+  bool get_entity_table_request(lrdb::response_message& response,
+                                const json::value& param) {
+    if (!ensure_attached(response, "get_entity_table") ||
+        !ensure_lua_interface(response, "get_entity_table")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity_table",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (params.count("index") == 0 ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity_table",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    std::string filter;
+    if (params.count("filter") > 0) {
+      if (!params.at("filter").is<std::string>()) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "get_entity_table",
+                             error_data("request", "filter"));
+        return send_response(response);
+      }
+      filter = params.at("filter").get<std::string>();
+    }
+
+    json::array entries;
+    try {
+      EntityQuery entity_query(lua_base_);
+      entries = entity_query.get_entity_table_entries(entity_index, filter);
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity table query failed", "get_entity_table",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    json::object result;
+    result["index"] = json::value(static_cast<double>(entity_index));
+    result["total"] = json::value(static_cast<double>(entries.size()));
+    result["entries"] = json::value(entries);
+    response.result = json::value(result);
+    return send_response(response);
+  }
+
+  bool set_entity_table_value_request(lrdb::response_message& response,
+                                      const json::value& param) {
+    if (!ensure_attached(response, "set_entity_table_value") ||
+        !ensure_lua_interface(response, "set_entity_table_value")) {
+      return send_response(response);
+    }
+
+    if (!debugger_.paused()) {
+      set_structured_error(
+          response, -32001,
+          "Entity table modification requires debugger to be paused",
+          "set_entity_table_value", error_data("request", "state", "running"));
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_table_value",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (params.count("index") == 0 ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_table_value",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    if (params.count("property") == 0 || !params.at("property").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_table_value",
+                           error_data("request", "property"));
+      return send_response(response);
+    }
+
+    if (params.count("value") == 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_table_value",
+                           error_data("request", "value"));
+      return send_response(response);
+    }
+
+    const std::string field_name = params.at("property").get<std::string>();
+    const json::value& value = params.at("value");
+
+    EntityQuery entity_query(lua_base_);
+    bool updated = false;
+    try {
+      updated = entity_query.set_entity_table_field(entity_index, field_name, value);
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity table modification failed",
+                           "set_entity_table_value",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    if (!updated) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "entity table update failed", "set_entity_table_value",
+                           error_data("request", "entity"));
+      return send_response(response);
+    }
+
+    json::object result;
+    result["ok"] = json::value(true);
+    result["index"] = json::value(static_cast<double>(entity_index));
+    result["property"] = json::value(field_name);
+    response.result = json::value(result);
+    return send_response(response);
+  }
+
+  bool get_entity_network_vars_request(lrdb::response_message& response,
+                                       const json::value& param) {
+    if (!ensure_attached(response, "get_entity_network_vars") ||
+        !ensure_lua_interface(response, "get_entity_network_vars")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity_network_vars",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (params.count("index") == 0 ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_entity_network_vars",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    json::array entries;
+    try {
+      EntityQuery entity_query(lua_base_);
+      entries = entity_query.get_entity_network_var_entries(entity_index);
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "entity network var query failed",
+                           "get_entity_network_vars",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    json::object result;
+    result["index"] = json::value(static_cast<double>(entity_index));
+    result["total"] = json::value(static_cast<double>(entries.size()));
+    result["entries"] = json::value(entries);
+    response.result = json::value(result);
     return send_response(response);
   }
 
@@ -1028,6 +1213,86 @@ class basic_server {
     result["ok"] = json::value(true);
     result["index"] = json::value(static_cast<double>(entity_index));
     result["property"] = json::value(property_name);
+    response.result = json::value(result);
+    return send_response(response);
+  }
+
+  bool set_entity_network_var_request(lrdb::response_message& response,
+                                      const json::value& param) {
+    if (!ensure_attached(response, "set_entity_network_var") ||
+        !ensure_lua_interface(response, "set_entity_network_var")) {
+      return send_response(response);
+    }
+
+    if (!debugger_.paused()) {
+      set_structured_error(
+          response, -32001,
+          "NetworkVar modification requires debugger to be paused",
+          "set_entity_network_var", error_data("request", "state", "running"));
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_network_var",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    int entity_index = 0;
+    if (params.count("index") == 0 ||
+        !try_parse_non_negative_int(params.at("index"), entity_index) ||
+        entity_index <= 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_network_var",
+                           error_data("request", "index"));
+      return send_response(response);
+    }
+
+    if (params.count("name") == 0 || !params.at("name").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_network_var",
+                           error_data("request", "name"));
+      return send_response(response);
+    }
+
+    if (params.count("value") == 0) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "set_entity_network_var",
+                           error_data("request", "value"));
+      return send_response(response);
+    }
+
+    const std::string var_name = params.at("name").get<std::string>();
+    const json::value& value = params.at("value");
+
+    EntityQuery entity_query(lua_base_);
+    bool updated = false;
+    try {
+      updated = entity_query.set_entity_network_var(entity_index, var_name, value);
+    } catch (const std::exception& ex) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "network var modification failed",
+                           "set_entity_network_var",
+                           error_data("request", "lua", ex.what()));
+      return send_response(response);
+    }
+
+    if (!updated) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "network var update failed", "set_entity_network_var",
+                           error_data("request", "entity"));
+      return send_response(response);
+    }
+
+    // Successful setter invocation means the call path worked; the game may
+    // still clamp/reject values in scripted logic after this request returns.
+
+    json::object result;
+    result["ok"] = json::value(true);
+    result["index"] = json::value(static_cast<double>(entity_index));
+    result["name"] = json::value(var_name);
     response.result = json::value(result);
     return send_response(response);
   }
@@ -1394,6 +1659,10 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(get_metrics),
         LRDB_DEBUG_COMMAND_TABLE(get_entities),
         LRDB_DEBUG_COMMAND_TABLE(get_entity),
+        LRDB_DEBUG_COMMAND_TABLE(get_entity_network_vars),
+        LRDB_DEBUG_COMMAND_TABLE(get_entity_table),
+        LRDB_DEBUG_COMMAND_TABLE(set_entity_table_value),
+        LRDB_DEBUG_COMMAND_TABLE(set_entity_network_var),
         LRDB_DEBUG_COMMAND_TABLE(set_entity_property),
         LRDB_DEBUG_COMMAND_TABLE(command),
         LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
