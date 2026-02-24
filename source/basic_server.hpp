@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <map>
@@ -495,6 +496,41 @@ class basic_server {
 
     return true;
   }
+
+  static bool starts_with_case_insensitive(const std::string& value,
+                                           const char* prefix) {
+    if (prefix == nullptr) {
+      return false;
+    }
+
+    const size_t prefix_len = std::strlen(prefix);
+    if (value.size() < prefix_len) {
+      return false;
+    }
+
+    for (size_t i = 0; i < prefix_len; ++i) {
+      const char lhs = static_cast<char>(
+          std::tolower(static_cast<unsigned char>(value[i])));
+      const char rhs = static_cast<char>(
+          std::tolower(static_cast<unsigned char>(prefix[i])));
+      if (lhs != rhs) {
+        return false;
+      }
+    }
+
+    return value.size() == prefix_len || is_space(value[prefix_len]);
+  }
+
+  static bool should_force_console_adapter_dispatch(
+      const std::string& command) {
+    return starts_with_case_insensitive(command, "lua_run") ||
+           starts_with_case_insensitive(command, "lua_run_cl") ||
+           starts_with_case_insensitive(command, "lua_run_menu") ||
+           starts_with_case_insensitive(command, "lua_openscript") ||
+           starts_with_case_insensitive(command, "lua_openscript_cl") ||
+           starts_with_case_insensitive(command, "lua_openscript_menu");
+  }
+
   bool step_request(lrdb::response_message& response, const json::value&) {
     if (!ensure_attached(response, "step")) {
       return send_response(response);
@@ -865,6 +901,12 @@ class basic_server {
       return send_response(response);
     }
 
+    if (lua_base_ != nullptr) {
+      EntityQuery entity_query(lua_base_);
+      response.result = json::value(entity_query.get_entity_detail(entity_index));
+      return send_response(response);
+    }
+
     EntitySnapshotQuery entity_query;
     response.result = json::value(entity_query.get_entity_detail(entity_index));
 
@@ -948,6 +990,22 @@ class basic_server {
           return send_response(response);
         }
         updated = entity_query.set_entity_angles(entity_index, pitch, yaw, roll);
+      } else if (property_name == "health") {
+        double health = 0.0;
+        if (!property_value.is<double>()) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "set_entity_property",
+                               error_data("request", "health"));
+          return send_response(response);
+        }
+        health = property_value.get<double>();
+        if (!std::isfinite(health)) {
+          set_structured_error(response, lrdb::response_error::InvalidParams,
+                               "invalid params", "set_entity_property",
+                               error_data("request", "health"));
+          return send_response(response);
+        }
+        updated = entity_query.set_entity_health(entity_index, health);
       } else {
         updated =
             entity_query.set_entity_field(entity_index, property_name, property_value);
@@ -1184,6 +1242,14 @@ class basic_server {
 
     if (lua_base_ == nullptr) {
       if (!run_console_fallback("lua interface unavailable")) {
+        return send_response(response);
+      }
+      return send_response(response);
+    }
+
+    if (should_force_console_adapter_dispatch(command)) {
+      if (!run_console_fallback(
+              "command requires engine dispatch (game.ConsoleCommand blocked)")) {
         return send_response(response);
       }
       return send_response(response);

@@ -222,21 +222,45 @@ class EntityQuery {
       return false;
     }
 
-    lua_->GetField(entity, "SetAngles");
-    if (!is_type(-1, "function")) {
+    if (try_invoke_entity_angle_setter(entity, "SetAngles", pitch, yaw,
+                                       roll)) {
+      return true;
+    }
+
+    // Players may reject SetAngles; SetEyeAngles is the reliable fallback.
+    return try_invoke_entity_angle_setter(entity, "SetEyeAngles", pitch, yaw,
+                                          roll);
+  }
+
+  bool set_entity_health(int entity_index, double health) {
+    if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(health)) {
       return false;
     }
 
-    lua_->Push(entity);
+    stack_guard guard(lua_);
+    if (!push_entity_by_index(entity_index)) {
+      return false;
+    }
 
-    QAngle ang;
-    ang.x = static_cast<float>(pitch);
-    ang.y = static_cast<float>(yaw);
-    ang.z = static_cast<float>(roll);
-    lua_->PushAngle(ang);
+    const int entity = abs_index(-1);
+    bool is_valid = false;
+    if (!try_get_entity_bool(entity, "IsValid", is_valid) || !is_valid) {
+      return false;
+    }
 
-    pcall_checked(2, 0, "Entity:SetAngles");
-    return true;
+    lua_->GetField(entity, "SetHealth");
+    if (is_type(-1, "function")) {
+      try {
+        lua_->Push(entity);
+        lua_->PushNumber(health);
+        pcall_checked(2, 0, "Entity:SetHealth");
+        return true;
+      } catch (const std::exception&) {
+        return false;
+      }
+    }
+    lua_->Pop(1);
+    return false;
   }
 
   int last_total() const { return last_total_; }
@@ -348,9 +372,8 @@ class EntityQuery {
       return false;
     }
 
-    lua_->Push(ents_table);
     lua_->PushNumber(static_cast<double>(entity_index));
-    pcall_checked(2, 1, "ents.GetByIndex");
+    pcall_checked(1, 1, "ents.GetByIndex");
 
     lua_->Remove(-2);  // Remove ents table.
     return !is_type(-1, "nil");
@@ -469,6 +492,31 @@ class EntityQuery {
              picojson::value(static_cast<double>(ang.y)),
              picojson::value(static_cast<double>(ang.z))};
       lua_->Pop(1);
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
+  }
+
+  bool try_invoke_entity_angle_setter(int entity_index, const char* method_name,
+                                      double pitch, double yaw,
+                                      double roll) {
+    try {
+      lua_->GetField(entity_index, method_name);
+      if (!is_type(-1, "function")) {
+        lua_->Pop(1);
+        return false;
+      }
+
+      lua_->Push(entity_index);
+
+      QAngle ang;
+      ang.x = static_cast<float>(pitch);
+      ang.y = static_cast<float>(yaw);
+      ang.z = static_cast<float>(roll);
+      lua_->PushAngle(ang);
+
+      pcall_checked(2, 0, method_name);
       return true;
     } catch (const std::exception&) {
       return false;

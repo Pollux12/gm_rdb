@@ -212,6 +212,16 @@ class EntitySnapshotQuery {
     }
 
     summary = build_entity_summary(index, edict);
+    const auto class_match = summary.find("class");
+    if (class_match == summary.end() || !class_match->second.is<std::string>()) {
+      return false;
+    }
+
+    const std::string class_name = class_match->second.get<std::string>();
+    if (class_name.empty()) {
+      return false;
+    }
+
     return true;
   }
 
