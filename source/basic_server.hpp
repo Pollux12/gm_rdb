@@ -5,6 +5,7 @@
 #endif
 
 #include <memory>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cctype>
@@ -529,6 +530,226 @@ class basic_server {
            starts_with_case_insensitive(command, "lua_openscript") ||
            starts_with_case_insensitive(command, "lua_openscript_cl") ||
            starts_with_case_insensitive(command, "lua_openscript_menu");
+  }
+
+  static bool try_parse_realm_value(const json::value& value,
+                                    std::string& normalized_realm) {
+    if (!value.is<std::string>()) {
+      return false;
+    }
+
+    normalized_realm = value.get<std::string>();
+    std::transform(normalized_realm.begin(), normalized_realm.end(),
+                   normalized_realm.begin(), [](unsigned char ch) {
+                     return static_cast<char>(std::tolower(ch));
+                   });
+
+    return normalized_realm == "server" || normalized_realm == "client" ||
+           normalized_realm == "shared";
+  }
+
+  bool invoke_gluals_function(const char* function_name,
+                              const std::vector<std::string>& args,
+                              std::string& out_error) {
+    if (lua_base_ == nullptr) {
+      out_error = "lua interface unavailable";
+      return false;
+    }
+
+    const int stack_top = lua_base_->Top();
+    auto restore_stack = [&]() {
+      const int pop_count = lua_base_->Top() - stack_top;
+      if (pop_count > 0) {
+        lua_base_->Pop(pop_count);
+      }
+    };
+
+    lua_base_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_base_->GetField(-1, "_GLUALS");
+    if (!lua_base_->IsType(-1, GarrysMod::Lua::Type::Table)) {
+      restore_stack();
+      out_error = "_GLUALS table unavailable (run debugger setup to install lua/autorun/debug.lua)";
+      return false;
+    }
+
+    lua_base_->GetField(-1, function_name);
+    if (!lua_base_->IsType(-1, GarrysMod::Lua::Type::Function)) {
+      restore_stack();
+      out_error = std::string("_GLUALS.") + function_name + " is unavailable";
+      return false;
+    }
+
+    for (const std::string& arg : args) {
+      lua_base_->PushString(arg.c_str());
+    }
+
+    if (lua_base_->PCall(static_cast<int>(args.size()), 2, 0) != 0) {
+      const char* err = lua_base_->GetString(-1);
+      out_error = err != nullptr ? std::string(err) : "unknown lua error";
+      lua_base_->Pop(1);
+      restore_stack();
+      return false;
+    }
+
+    bool ok = true;
+    if (lua_base_->IsType(-2, GarrysMod::Lua::Type::Bool)) {
+      ok = lua_base_->GetBool(-2);
+    }
+
+    if (!ok) {
+      if (lua_base_->IsType(-1, GarrysMod::Lua::Type::String)) {
+        const char* err = lua_base_->GetString(-1);
+        out_error = err != nullptr ? std::string(err)
+                                   : std::string("bridge reported failure");
+      } else {
+        out_error = "bridge reported failure";
+      }
+      lua_base_->Pop(2);
+      restore_stack();
+      return false;
+    }
+
+    lua_base_->Pop(2);
+    restore_stack();
+    return true;
+  }
+
+  bool run_lua_request(lrdb::response_message& response,
+                       const json::value& param) {
+    if (!ensure_attached(response, "run_lua") ||
+        !ensure_lua_interface(response, "run_lua")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_lua",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    if (params.count("lua") == 0 || !params.at("lua").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_lua",
+                           error_data("request", "lua"));
+      return send_response(response);
+    }
+
+    std::string realm;
+    if (params.count("realm") == 0 ||
+        !try_parse_realm_value(params.at("realm"), realm)) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_lua",
+                           error_data("request", "realm"));
+      return send_response(response);
+    }
+
+    const std::string chunk = params.at("lua").get<std::string>();
+    if (chunk.size() > kMaxRunLuaChunkBytes) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "lua chunk exceeds limit", "run_lua",
+                           error_data("request", "chunk_size"));
+      return send_response(response);
+    }
+
+    std::string bridge_error;
+    if (!invoke_gluals_function("runLua", {realm, chunk}, bridge_error)) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "failed to execute lua", "run_lua",
+                           error_data("request", "runtime", bridge_error));
+    }
+
+    return send_response(response);
+  }
+
+  bool run_file_request(lrdb::response_message& response,
+                        const json::value& param) {
+    if (!ensure_attached(response, "run_file") ||
+        !ensure_lua_interface(response, "run_file")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_file",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    if (params.count("file") == 0 || !params.at("file").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
+
+    std::string realm;
+    if (params.count("realm") == 0 ||
+        !try_parse_realm_value(params.at("realm"), realm)) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_file",
+                           error_data("request", "realm"));
+      return send_response(response);
+    }
+
+    const std::string file = params.at("file").get<std::string>();
+    if (file.empty() || file.size() > kMaxLuaFilePathBytes) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "run_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
+
+    std::string bridge_error;
+    if (!invoke_gluals_function("runFile", {realm, file}, bridge_error)) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "failed to execute file", "run_file",
+                           error_data("request", "runtime", bridge_error));
+    }
+
+    return send_response(response);
+  }
+
+  bool refresh_file_request(lrdb::response_message& response,
+                            const json::value& param) {
+    if (!ensure_attached(response, "refresh_file") ||
+        !ensure_lua_interface(response, "refresh_file")) {
+      return send_response(response);
+    }
+
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "refresh_file",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    const json::object& params = param.get<json::object>();
+    if (params.count("file") == 0 || !params.at("file").is<std::string>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "refresh_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
+
+    const std::string file = params.at("file").get<std::string>();
+    if (file.empty() || file.size() > kMaxLuaFilePathBytes) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "refresh_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
+
+    std::string bridge_error;
+    if (!invoke_gluals_function("refreshFile", {file}, bridge_error)) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "failed to refresh file", "refresh_file",
+                           error_data("request", "runtime", bridge_error));
+    }
+
+    return send_response(response);
   }
 
   bool step_request(lrdb::response_message& response, const json::value&) {
@@ -1665,6 +1886,9 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(set_entity_network_var),
         LRDB_DEBUG_COMMAND_TABLE(set_entity_property),
         LRDB_DEBUG_COMMAND_TABLE(command),
+        LRDB_DEBUG_COMMAND_TABLE(run_lua),
+        LRDB_DEBUG_COMMAND_TABLE(run_file),
+        LRDB_DEBUG_COMMAND_TABLE(refresh_file),
         LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
 #undef LRDB_DEBUG_COMMAND_TABLE
     };
@@ -1712,6 +1936,8 @@ class basic_server {
   static constexpr int kDefaultEntityListLimit = 50;
   static constexpr int kMaxEntityListLimit = 200;
   static constexpr size_t kMaxEvalChunkBytes = 16 * 1024;
+  static constexpr size_t kMaxRunLuaChunkBytes = 256 * 1024;
+  static constexpr size_t kMaxLuaFilePathBytes = 1024;
   static constexpr size_t kMaxConsoleCommandBytes = 2048;
   static constexpr size_t kMaxConsoleCommandNameBytes = 128;
 
