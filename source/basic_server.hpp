@@ -18,6 +18,7 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <tier1/strtools.h>
 #include <utility>
 #include <vector>
 
@@ -433,12 +434,11 @@ class basic_server {
   }
 
   static bool is_space(char ch) {
-    return std::isspace(static_cast<unsigned char>(ch)) != 0;
+    return V_isspace(ch);
   }
 
   static bool is_valid_command_name_char(char ch) {
-    const unsigned char c = static_cast<unsigned char>(ch);
-    return std::isalnum(c) != 0 || ch == '_' || ch == '.' || ch == '+' ||
+    return V_isalnum(ch) || ch == '_' || ch == '.' || ch == '+' ||
            ch == '-';
   }
 
@@ -463,7 +463,7 @@ class basic_server {
         reason = "command chaining is not allowed";
         return false;
       }
-      if (std::iscntrl(value) != 0 && ch != '\t' && ch != ' ') {
+      if (V_iscntrl(value) && ch != '\t' && ch != ' ') {
         reason = "command contains control characters";
         return false;
       }
@@ -1520,14 +1520,12 @@ class basic_server {
 
   static std::string trim_copy(const std::string& value) {
     size_t begin = 0;
-    while (begin < value.size() &&
-           std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+    while (begin < value.size() && V_isspace(value[begin])) {
       ++begin;
     }
 
     size_t end = value.size();
-    while (end > begin &&
-           std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    while (end > begin && V_isspace(value[end - 1])) {
       --end;
     }
 

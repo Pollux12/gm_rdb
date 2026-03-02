@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tier1/strtools.h>
 
 #include <picojson.h>
 
@@ -498,8 +499,7 @@ class EntityQuery {
     }
 
     for (const char ch : field_name) {
-      const unsigned char value = static_cast<unsigned char>(ch);
-      if (std::isalnum(value) == 0 && ch != '_') {
+      if (!V_isalnum(ch) && ch != '_') {
         return false;
       }
     }

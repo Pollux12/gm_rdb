@@ -7,6 +7,7 @@
 #include <mutex>
 #include <regex>
 #include <string>
+#include <tier1/strtools.h>
 #include <utility>
 
 class error_aggregator {
@@ -39,8 +40,7 @@ class error_aggregator {
 
   static std::string trim(const std::string& input) {
     size_t first = 0;
-    while (first < input.size() &&
-           std::isspace(static_cast<unsigned char>(input[first])) != 0) {
+    while (first < input.size() && V_isspace(input[first])) {
       ++first;
     }
     if (first == input.size()) {
@@ -48,8 +48,7 @@ class error_aggregator {
     }
 
     size_t last = input.size();
-    while (last > first &&
-           std::isspace(static_cast<unsigned char>(input[last - 1])) != 0) {
+    while (last > first && V_isspace(input[last - 1])) {
       --last;
     }
 
@@ -99,7 +98,7 @@ class error_aggregator {
 
     bool prev_dash = false;
     for (const unsigned char c : normalized_message) {
-      if (std::isalnum(c) != 0) {
+      if (V_isalnum(c)) {
         fingerprint.push_back(
             static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
         prev_dash = false;
