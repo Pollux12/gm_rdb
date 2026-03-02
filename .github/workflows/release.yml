@@ -108,7 +108,7 @@ jobs:
             # For manual runs or release events, get the latest tag
             TAG=$(git describe --tags --abbrev=0)
           fi
-          
+
           # Check if release already exists for this tag
           BASE_TAG="$TAG"
           SUFFIX_CHAR="abcdefghijklmnopqrstuvwxyz"
@@ -117,7 +117,7 @@ jobs:
             TAG="${BASE_TAG}${SUFFIX_CHAR:$SUFFIX_IDX:1}"
             SUFFIX_IDX=$((SUFFIX_IDX + 1))
           done
-          
+
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Using tag: $TAG"
 
@@ -139,6 +139,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: gm_rdb ${{ steps.get_tag.outputs.tag }}
           draft: false
+          prerelease: true
           generate_release_notes: true
           files: release/*
 
