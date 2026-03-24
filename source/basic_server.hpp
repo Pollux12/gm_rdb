@@ -29,8 +29,10 @@
 
 #include "console_adapter_logging.hpp"
 #include "console_adapter_spew.hpp"
+#ifndef GMOD_CLIENT_MODULE
 #include "entity_query.hpp"
 #include "entity_snapshot.hpp"
+#endif
 #include "error_aggregator.hpp"
 
 #define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
@@ -548,6 +550,7 @@ class basic_server {
            normalized_realm == "shared";
   }
 
+#ifndef GMOD_CLIENT_MODULE
   bool invoke_gluals_function(const char* function_name,
                               const std::vector<std::string>& args,
                               std::string& out_error) {
@@ -613,7 +616,9 @@ class basic_server {
     restore_stack();
     return true;
   }
+#endif  // !GMOD_CLIENT_MODULE
 
+#ifndef GMOD_CLIENT_MODULE
   bool run_lua_request(lrdb::response_message& response,
                        const json::value& param) {
     if (!ensure_attached(response, "run_lua") ||
@@ -751,6 +756,7 @@ class basic_server {
 
     return send_response(response);
   }
+#endif  // !GMOD_CLIENT_MODULE
 
   bool step_request(lrdb::response_message& response, const json::value&) {
     if (!ensure_attached(response, "step")) {
@@ -1023,6 +1029,7 @@ class basic_server {
     return send_response(response);
   }
 
+#ifndef GMOD_CLIENT_MODULE
   bool get_entities_request(lrdb::response_message& response,
                             const json::value& param) {
     if (!ensure_attached(response, "get_entities")) {
@@ -1517,6 +1524,7 @@ class basic_server {
     response.result = json::value(result);
     return send_response(response);
   }
+#endif  // !GMOD_CLIENT_MODULE
 
   static std::string trim_copy(const std::string& value) {
     size_t begin = 0;
@@ -1686,6 +1694,7 @@ class basic_server {
     return json::value(metrics);
   }
 
+#ifndef GMOD_CLIENT_MODULE
   bool command_request(lrdb::response_message& response,
                            const json::value& param) {
     if (!ensure_attached(response, "command")) {
@@ -1793,6 +1802,7 @@ class basic_server {
     lua_base_->Pop(lua_base_->Top() - stack_top);
     return send_response(response);
   }
+#endif  // !GMOD_CLIENT_MODULE
 
   bool init_request(lrdb::response_message& response,
                     const json::value& param) {
@@ -1876,6 +1886,7 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(eval),
         LRDB_DEBUG_COMMAND_TABLE(get_global),
         LRDB_DEBUG_COMMAND_TABLE(get_metrics),
+#ifndef GMOD_CLIENT_MODULE
         LRDB_DEBUG_COMMAND_TABLE(get_entities),
         LRDB_DEBUG_COMMAND_TABLE(get_entity),
         LRDB_DEBUG_COMMAND_TABLE(get_entity_network_vars),
@@ -1887,6 +1898,7 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(run_lua),
         LRDB_DEBUG_COMMAND_TABLE(run_file),
         LRDB_DEBUG_COMMAND_TABLE(refresh_file),
+#endif  // !GMOD_CLIENT_MODULE
         LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
 #undef LRDB_DEBUG_COMMAND_TABLE
     };

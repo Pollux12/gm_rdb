@@ -6,10 +6,17 @@
 
 namespace rdb
 {
-	typedef basic_server<lrdb::command_stream_socket> lrdb_server;
-
-	static int32_t metatype = GarrysMod::Lua::Type::None;
+	// Module identity — different for server (rdb) and client (rdb_client) builds
+#ifdef GMOD_CLIENT_MODULE
+	static const char* kGlobalName = "rdb_client";
+	static const int16_t default_port = 21112;
+#else
+	static const char* kGlobalName = "rdb";
 	static const int16_t default_port = 21111;
+#endif
+
+	typedef basic_server<lrdb::command_stream_socket> lrdb_server;
+	static int32_t metatype = GarrysMod::Lua::Type::None;
 	static lrdb_server *active_server = nullptr;
 	// Pointer to the inner slot inside the Lua userdata. Kept in sync so that
 	// Deinitialize can null it before GC runs destruct, preventing a double-free.
@@ -66,7 +73,7 @@ namespace rdb
 
 	static int32_t Initialize( GarrysMod::Lua::ILuaBase *LUA )
 	{
-		metatype = LUA->CreateMetaTable( "rdb" );
+		metatype = LUA->CreateMetaTable( kGlobalName );
 
 		LUA->PushCFunction( destruct );
 		LUA->SetField( -2, "__gc" );
@@ -97,7 +104,7 @@ namespace rdb
 		LUA->SetField( -2, "deactivate" );
 
 		LUA->Push( -1 );
-		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, "rdb" );
+		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, kGlobalName );
 
 		return 1;
 	}
@@ -119,7 +126,7 @@ namespace rdb
 		}
 
 		LUA->PushNil( );
-		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, "rdb" );
+		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, kGlobalName );
 		return 0;
 	}
 }

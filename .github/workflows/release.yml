@@ -58,7 +58,7 @@ jobs:
         run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build-client -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}" -DCLIENT_DLL=1
 
       - name: Build project for client
-        run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
+        run: cmake --build build-client -j -t rdb rdb_client --config ${{env.BUILD_TYPE}}
 
       - name: Find and copy binaries
         shell: bash
@@ -70,6 +70,14 @@ jobs:
           find build \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
           find build-client \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
           ls -la output/
+
+      - name: Verify client module is present
+        shell: bash
+        run: |
+          if ! find output -maxdepth 1 -type f -name 'gmcl_rdb_client*' | grep -q .; then
+            echo "Expected gmcl_rdb_client artifact was not produced."
+            exit 1
+          fi
 
       - name: Strip debug information from binaries and keep them outside (Ubuntu)
         if: ${{ startsWith(matrix.os, 'ubuntu-') }}
