@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <type_traits>
 
 #include <eiface.h>
 #include <edict.h>
@@ -12,6 +13,11 @@
 #include <iserverentity.h>
 #include <picojson.h>
 #include <string_t.h>
+
+#if defined(WIN64)
+static_assert(!std::is_pointer<string_t>::value,
+              "string_t ABI mismatch on Win64 (NO_STRING_T must be undefined)");
+#endif
 
 class EntitySnapshotQuery {
  public:
