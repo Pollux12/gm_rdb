@@ -34,14 +34,6 @@ target_compile_definitions(rdb PRIVATE
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
 )
 
-if(WIN32)
-    if(MSVC)
-        target_compile_options(rdb PRIVATE /UNO_STRING_T)
-    else()
-        target_compile_options(rdb PRIVATE -UNO_STRING_T)
-    endif()
-endif()
-
 set_gmod_suffix_prefix(rdb)
 
 # Autoinstall
@@ -80,14 +72,6 @@ target_compile_definitions(rdb_client PRIVATE
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
     GMOD_CLIENT_MODULE=1
 )
-
-if(WIN32)
-    if(MSVC)
-        target_compile_options(rdb_client PRIVATE /UNO_STRING_T)
-    else()
-        target_compile_options(rdb_client PRIVATE -UNO_STRING_T)
-    endif()
-endif()
 
 # Temporarily set CLIENT_DLL=ON so set_gmod_suffix_prefix produces gmcl_ prefix
 set(CLIENT_DLL ON)
