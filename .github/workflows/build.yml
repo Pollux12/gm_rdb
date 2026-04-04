@@ -53,10 +53,40 @@ jobs:
       - name: Download garrysmod_common
         uses: actions/checkout@v4
         with:
+          repository: danielga/garrysmod_common
+          ref: ${{ matrix.arch == 'x64' && 'x86-64-support-sourcesdk' || 'master' }}
+          submodules: recursive
+          path: third-party/garrysmod_common
+
+      - name: Download CMake overlay for garrysmod_common
+        uses: actions/checkout@v4
+        with:
           repository: dankmolot/garrysmod_common
           ref: ${{ matrix.arch == 'x64' && 'x86-64-cmake' || 'master-cmake' }}
           submodules: recursive
-          path: third-party/garrysmod_common
+          path: third-party/garrysmod_common_cmake_overlay
+
+      - name: Apply CMake overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          OVERLAY="third-party/garrysmod_common_cmake_overlay"
+          TARGET="third-party/garrysmod_common"
+
+          cp "$OVERLAY/CMakeLists.txt" "$TARGET/CMakeLists.txt"
+          rm -rf "$TARGET/cmake"
+          cp -R "$OVERLAY/cmake" "$TARGET/cmake"
+
+          while IFS= read -r -d '' file; do
+            rel="${file#"$OVERLAY/"}"
+            [[ "$rel" == "CMakeLists.txt" ]] && continue
+            [[ "$rel" == cmake/* ]] && continue
+            target_file="$TARGET/$rel"
+            if [[ ! -f "$target_file" ]]; then
+              mkdir -p "$(dirname "$target_file")"
+              cp "$file" "$target_file"
+            fi
+          done < <(find "$OVERLAY" -type f -name CMakeLists.txt -print0)
 
       - name: Configure project
         run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}"
@@ -67,8 +97,8 @@ jobs:
       - name: Configure project for client
         run: cmake ${{matrix.CMAKE_ARCH_FLAG}} -B build-client -DGARRYSMOD_COMMON_PATH="third-party/garrysmod_common" -DAUTOINSTALL="." -DGIT_BRANCH="${{env.GIT_BRANCH}}" -DCMAKE_BUILD_TYPE="${{env.BUILD_TYPE}}" -DCLIENT_DLL=1
 
-      - name: Build project f0r client
-        run: cmake --build build-client -j -t rdb --config ${{env.BUILD_TYPE}}
+      - name: Build project for client
+        run: cmake --build build-client -j -t rdb_client --config ${{env.BUILD_TYPE}}
 
       - name: Find and copy binaries
         shell: bash

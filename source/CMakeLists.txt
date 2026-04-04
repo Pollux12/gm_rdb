@@ -34,6 +34,14 @@ target_compile_definitions(rdb PRIVATE
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
 )
 
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    if(MSVC)
+        target_compile_options(rdb PRIVATE /UNO_STRING_T)
+    else()
+        target_compile_options(rdb PRIVATE -UNO_STRING_T)
+    endif()
+endif()
+
 set_gmod_suffix_prefix(rdb)
 
 # Autoinstall
@@ -42,7 +50,7 @@ if(IS_DIRECTORY ${AUTOINSTALL})
     autoinstall(rdb ${AUTOINSTALL})
 endif()
 
-# --- Client debug module (gmcl_rdb_client) ---
+# --- Client module ---
 add_library(rdb_client SHARED ${SOURCES})
 
 target_link_libraries(rdb_client PRIVATE
@@ -73,10 +81,19 @@ target_compile_definitions(rdb_client PRIVATE
     GMOD_CLIENT_MODULE=1
 )
 
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    if(MSVC)
+        target_compile_options(rdb_client PRIVATE /UNO_STRING_T)
+    else()
+        target_compile_options(rdb_client PRIVATE -UNO_STRING_T)
+    endif()
+endif()
+
 # Temporarily set CLIENT_DLL=ON so set_gmod_suffix_prefix produces gmcl_ prefix
 set(CLIENT_DLL ON)
 set_gmod_suffix_prefix(rdb_client)
 set(CLIENT_DLL OFF)
+set_target_properties(rdb_client PROPERTIES OUTPUT_NAME "rdb")
 
 # Autoinstall client module
 set(AUTOINSTALL_CLIENT "" CACHE PATH "Autoinstall path for client module")

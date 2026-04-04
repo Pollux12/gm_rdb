@@ -4,3 +4,5 @@ CMakeUserPresets.json
 /build*/
 /output/
 /.vscode/
+/act_artifacts_*/
+/act_*.log

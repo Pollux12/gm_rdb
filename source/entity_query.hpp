@@ -45,7 +45,7 @@ class EntityQuery {
       picojson::object summary = build_entity_summary(-1);
       if (matches_class_filter(summary, filter_class)) {
         last_total_ = 1;
-        if (offset == 0) {
+        if (offset == 0 && limit > 0) {
           entities.emplace_back(summary);
         }
       }
