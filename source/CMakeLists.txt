@@ -34,6 +34,21 @@ target_compile_definitions(rdb PRIVATE
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
 )
 
+if(WIN32)
+    set(GM_RDB_VERSION_RC "${CMAKE_CURRENT_BINARY_DIR}/gm_rdb_version.rc")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(GM_RDB_ORIGINAL_FILENAME "gmsv_rdb_win64.dll")
+    else()
+        set(GM_RDB_ORIGINAL_FILENAME "gmsv_rdb_win32.dll")
+    endif()
+    configure_file(
+        "${CMAKE_CURRENT_LIST_DIR}/gm_rdb_version.rc.in"
+        "${GM_RDB_VERSION_RC}"
+        @ONLY
+    )
+    target_sources(rdb PRIVATE "${GM_RDB_VERSION_RC}")
+endif()
+
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     if(MSVC)
         target_compile_options(rdb PRIVATE /UNO_STRING_T)
@@ -81,6 +96,21 @@ target_compile_definitions(rdb_client PRIVATE
     GMOD_CLIENT_MODULE=1
 )
 
+if(WIN32)
+    set(GM_RDB_CLIENT_VERSION_RC "${CMAKE_CURRENT_BINARY_DIR}/gmcl_rdb_version.rc")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(GM_RDB_ORIGINAL_FILENAME "gmcl_rdb_win64.dll")
+    else()
+        set(GM_RDB_ORIGINAL_FILENAME "gmcl_rdb_win32.dll")
+    endif()
+    configure_file(
+        "${CMAKE_CURRENT_LIST_DIR}/gm_rdb_version.rc.in"
+        "${GM_RDB_CLIENT_VERSION_RC}"
+        @ONLY
+    )
+    target_sources(rdb_client PRIVATE "${GM_RDB_CLIENT_VERSION_RC}")
+endif()
+
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     if(MSVC)
         target_compile_options(rdb_client PRIVATE /UNO_STRING_T)
@@ -93,7 +123,10 @@ endif()
 set(CLIENT_DLL ON)
 set_gmod_suffix_prefix(rdb_client)
 set(CLIENT_DLL OFF)
-set_target_properties(rdb_client PROPERTIES OUTPUT_NAME "rdb")
+set_target_properties(rdb_client PROPERTIES
+    OUTPUT_NAME "rdb"
+    ARCHIVE_OUTPUT_NAME "rdb_client"
+)
 
 # Autoinstall client module
 set(AUTOINSTALL_CLIENT "" CACHE PATH "Autoinstall path for client module")

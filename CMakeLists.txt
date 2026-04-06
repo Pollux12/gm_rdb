@@ -15,7 +15,37 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-set(GM_RDB_VERSION "1.2.0")
+# Allow explicit override from CI/local builds, otherwise infer from Git tags.
+set(GM_RDB_FALLBACK_VERSION "1.2.0")
+set(GM_RDB_VERSION "" CACHE STRING "gm_rdb semantic version (major.minor.patch)")
+
+if(GM_RDB_VERSION STREQUAL "")
+    set(_gm_rdb_tag_raw "")
+
+    # Only use a Git-derived version when the current commit is tagged.
+    execute_process(
+        COMMAND git describe --tags --exact-match
+        WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+        RESULT_VARIABLE _gm_rdb_exact_tag_result
+        OUTPUT_VARIABLE _gm_rdb_exact_tag
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_gm_rdb_exact_tag_result EQUAL 0 AND NOT _gm_rdb_exact_tag STREQUAL "")
+        set(_gm_rdb_tag_raw "${_gm_rdb_exact_tag}")
+    endif()
+
+    string(REGEX REPLACE "^v" "" _gm_rdb_tag_no_prefix "${_gm_rdb_tag_raw}")
+    string(REGEX MATCH "^([0-9]+\\.[0-9]+\\.[0-9]+)" _gm_rdb_tag_semver "${_gm_rdb_tag_no_prefix}")
+
+    if(_gm_rdb_tag_semver)
+        set(GM_RDB_VERSION "${_gm_rdb_tag_semver}")
+    else()
+        set(GM_RDB_VERSION "${GM_RDB_FALLBACK_VERSION}")
+    endif()
+endif()
+
+message(STATUS "gm_rdb resolved version: ${GM_RDB_VERSION}")
 
 # Get the latest abbreviated commit hash of the working branch
 execute_process(

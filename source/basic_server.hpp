@@ -76,6 +76,7 @@ class basic_server {
         has_active_connection_(false),
         pending_pause_on_error_(false),
         stop_on_error_(false),
+        pause_on_activate_(false),
         lua_base_(nullptr),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
@@ -103,6 +104,9 @@ class basic_server {
       console_adapter_.set_callback(std::bind(
           &basic_server<StreamType>::handle_console_output, this,
           std::placeholders::_1));
+      if (pause_on_activate_) {
+        debugger_.pause();
+      }
     }
   }
 
@@ -131,6 +135,10 @@ class basic_server {
   }
 
   StreamType& command_stream() { return command_stream_; };
+
+  void set_pause_on_activate(bool pause_on_activate) {
+    pause_on_activate_ = pause_on_activate;
+  }
 
  private:
   void init() {
@@ -1957,6 +1965,7 @@ class basic_server {
   bool has_active_connection_;
   std::atomic_bool pending_pause_on_error_;
   bool stop_on_error_;
+  bool pause_on_activate_;
   GarrysMod::Lua::ILuaBase* lua_base_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};

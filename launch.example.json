@@ -12,6 +12,7 @@
             // If debugging directly on a Garry's Mod server or client instance, "sourceRoot" pointing to Garry's Mod "garrysmod" directory should be enough
             "sourceRoot": "{FULL PATH TO GARRY'S MOD CONTENT DIRECTORY}",
             // Host to connect to (defaults to localhost), can be localhost (127.0.0.1) or any remote host
+            // Remote hosts require Garry's Mod / SRCDS to be started with -rdb_allow_remote
             "host": "localhost",
             // Port to connect to (defaults to 21111), in case you change it with rdb.activate(port_number)
             "port": 21111,
@@ -36,6 +37,8 @@
             // Working directory for the program (defaults to program executable directory)
             "cwd": "{DEFAULTS TO FULL PATH OF GARRY'S MOD EXECUTABLE DIRECTORY}",
             // Array of arguments to pass to the program
+            // Add -rdb_allow_remote to accept non-loopback debugger connections
+            // Add -rdb_pause_on_activate to pause on the next hook event after rdb.activate(...)
             "args": [],
             // If debugging directly on a Garry's Mod server or client instance, "sourceRoot" pointing to Garry's Mod "garrysmod" directory should be enough (defaults to working directory)
             "sourceRoot": "{DEFAULTS TO WORKING DIRECTORY}",
