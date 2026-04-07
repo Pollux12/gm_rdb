@@ -3,9 +3,12 @@
 #include "basic_server.hpp"
 
 #include <lrdb/command_stream/socket.hpp>
+#include <cerrno>
+#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 
 #if defined(_WIN32)
@@ -26,8 +29,13 @@ namespace rdb
 	typedef basic_server<lrdb::command_stream_socket> lrdb_server;
 	static int32_t metatype = GarrysMod::Lua::Type::None;
 	static lrdb_server *active_server = nullptr;
-	static bool allow_remote_connections = false;
-	static bool pause_on_activate = false;
+	struct RuntimeOptions
+	{
+		bool allow_remote_connections = false;
+		bool pause_on_activate = false;
+		int pause_timeout_seconds = 0;
+	};
+	static RuntimeOptions runtime_options;
 	static const char* kAllowRemoteFlag = "-rdb_allow_remote";
 	static const char* kPauseOnActivateFlag = "-rdb_pause_on_activate";
 	// Pointer to the inner slot inside the Lua userdata. Kept in sync so that
@@ -39,12 +47,10 @@ namespace rdb
 		return ch == '\0' || ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
 	}
 
-	static bool HasLaunchFlag( const char* flag )
+	static bool TryReadCommandLine( std::string& command_line )
 	{
-		if( flag == nullptr || flag[0] == '\0' )
-			return false;
+		command_line.clear( );
 
-		std::string command_line;
 #if defined(_WIN32)
 		const char* raw_command_line = GetCommandLineA( );
 		if( raw_command_line == nullptr )
@@ -65,6 +71,14 @@ namespace rdb
 		}
 #endif
 
+		return true;
+	}
+
+	static bool HasLaunchFlag( const std::string& command_line, const char* flag )
+	{
+		if( flag == nullptr || flag[0] == '\0' )
+			return false;
+
 		const std::string flag_text( flag );
 		size_t pos = 0;
 		while( ( pos = command_line.find( flag_text, pos ) ) != std::string::npos )
@@ -80,10 +94,75 @@ namespace rdb
 		return false;
 	}
 
+	static bool TryParseNonNegativeInt( const std::string& text, int& value )
+	{
+		if( text.empty( ) )
+			return false;
+
+		errno = 0;
+		char* end_ptr = nullptr;
+		const long parsed = std::strtol( text.c_str( ), &end_ptr, 10 );
+		if( errno != 0 || end_ptr == text.c_str( ) || *end_ptr != '\0' )
+			return false;
+		if( parsed < 0 || parsed > std::numeric_limits<int>::max( ) )
+			return false;
+
+		value = static_cast<int>( parsed );
+		return true;
+	}
+
+	static bool TryGetLaunchFlagValue( const std::string& command_line, const char* flag, int& value )
+	{
+		if( flag == nullptr || flag[0] == '\0' )
+			return false;
+
+		const std::string flag_text( flag );
+		size_t pos = 0;
+		while( ( pos = command_line.find( flag_text, pos ) ) != std::string::npos )
+		{
+			const char before = pos == 0 ? ' ' : command_line[pos - 1];
+			const size_t after_index = pos + flag_text.size( );
+			const char after = after_index >= command_line.size( ) ? '\0' : command_line[after_index];
+			if( IsCommandLineBoundary( before ) && IsCommandLineBoundary( after ) )
+			{
+				size_t value_start = after_index;
+				while( value_start < command_line.size( ) && IsCommandLineBoundary( command_line[value_start] ) )
+					++value_start;
+				if( value_start >= command_line.size( ) || command_line[value_start] == '-' )
+					return false;
+
+				size_t value_end = value_start;
+				while( value_end < command_line.size( ) && !IsCommandLineBoundary( command_line[value_end] ) )
+					++value_end;
+
+				return TryParseNonNegativeInt(
+					command_line.substr( value_start, value_end - value_start ),
+					value
+				);
+			}
+			pos = after_index;
+		}
+
+		return false;
+	}
+
 	static void RefreshRuntimeOptions( )
 	{
-		allow_remote_connections = HasLaunchFlag( kAllowRemoteFlag );
-		pause_on_activate = HasLaunchFlag( kPauseOnActivateFlag );
+		runtime_options = RuntimeOptions{ };
+
+		std::string command_line;
+		if( !TryReadCommandLine( command_line ) )
+			return;
+
+		runtime_options.allow_remote_connections = HasLaunchFlag( command_line, kAllowRemoteFlag );
+		runtime_options.pause_on_activate = HasLaunchFlag( command_line, kPauseOnActivateFlag );
+		if( runtime_options.pause_on_activate )
+		{
+			runtime_options.pause_timeout_seconds = 60;
+			int parsed_timeout_seconds = 0;
+			if( TryGetLaunchFlagValue( command_line, kPauseOnActivateFlag, parsed_timeout_seconds ) )
+				runtime_options.pause_timeout_seconds = parsed_timeout_seconds;
+		}
 	}
 
 	static void PrintStatusLine( GarrysMod::Lua::ILuaBase* LUA, const std::string& text )
@@ -110,12 +189,13 @@ namespace rdb
 		const int16_t port = LUA->IsType( 1, GarrysMod::Lua::Type::Number )
 			? static_cast<int16_t>( LUA->GetNumber( 1 ) )
 			: default_port;
-		const bool loopback_only = !allow_remote_connections;
+		const bool loopback_only = !runtime_options.allow_remote_connections;
 
 		try
 		{
 			*server = new lrdb_server( port, loopback_only );
-			( *server )->set_pause_on_activate( pause_on_activate );
+			( *server )->set_pause_timeout( runtime_options.pause_timeout_seconds );
+			( *server )->set_pause_on_activate( runtime_options.pause_on_activate );
 		}
 		catch( const std::exception& ex )
 		{
@@ -216,15 +296,20 @@ namespace rdb
 
 		PrintStatusLine( LUA, std::string( "[GLuaLS] DEBUG READY: " ) + kGlobalName + " module loaded and enabled.\n" );
 
-		if( allow_remote_connections )
+		if( runtime_options.allow_remote_connections )
 			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " network mode: remote connections enabled via " + kAllowRemoteFlag + ".\n" );
 		else
 			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " network mode: localhost-only (default). Use " + kAllowRemoteFlag + " to allow remote debugger connections.\n" );
 
-		if( pause_on_activate )
-			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " activation mode: pause-on-activate enabled via " + kPauseOnActivateFlag + ".\n" );
+		if( runtime_options.pause_on_activate )
+		{
+			const std::string pause_timer_text = runtime_options.pause_timeout_seconds == 0
+				? "infinite wait"
+				: std::to_string( runtime_options.pause_timeout_seconds ) + "s countdown";
+			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " activation mode: pause-on-activate enabled via " + kPauseOnActivateFlag + " with " + pause_timer_text + " (updates every second; resumes on connect unless stopped on entry).\n" );
+		}
 		else
-			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " activation mode: continue running on activate (default). Use " + kPauseOnActivateFlag + " to pause on activate.\n" );
+			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " activation mode: continue running on activate (default). Use " + kPauseOnActivateFlag + " [seconds] to pause on activate.\n" );
 
 		return 1;
 	}

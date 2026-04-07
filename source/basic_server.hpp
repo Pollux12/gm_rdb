@@ -77,6 +77,8 @@ class basic_server {
         pending_pause_on_error_(false),
         stop_on_error_(false),
         pause_on_activate_(false),
+        pause_on_activate_timeout_seconds_(60),
+        wait_for_initial_pause_connection_(false),
         lua_base_(nullptr),
         command_stream_(std::forward<StreamArgs>(arg)...) {
     init();
@@ -97,6 +99,7 @@ class basic_server {
     debugger_.reset(L);
     if (!L) {
       wait_for_connect_ = true;
+      wait_for_initial_pause_connection_ = false;
       debugger_.unpause();
       console_adapter_.set_callback(nullptr);
       command_stream_.reconnect();
@@ -105,7 +108,10 @@ class basic_server {
           &basic_server<StreamType>::handle_console_output, this,
           std::placeholders::_1));
       if (pause_on_activate_) {
+        wait_for_initial_pause_connection_ = true;
         debugger_.pause();
+      } else {
+        wait_for_initial_pause_connection_ = false;
       }
     }
   }
@@ -118,6 +124,7 @@ class basic_server {
     disposed_ = true;
     attached_ = false;
     wait_for_connect_ = true;
+    wait_for_initial_pause_connection_ = false;
     pending_pause_on_error_.store(false);
     error_aggregator_.clear();
     lua_base_ = nullptr;
@@ -140,6 +147,10 @@ class basic_server {
     pause_on_activate_ = pause_on_activate;
   }
 
+  void set_pause_timeout(int seconds) {
+    pause_on_activate_timeout_seconds_ = seconds < 0 ? 60 : seconds;
+  }
+
  private:
   void init() {
     debugger_.set_pause_handler([&](lrdb::debugger&) {
@@ -148,6 +159,9 @@ class basic_server {
       }
       send_pause_status();
       while (debugger_.paused() && command_stream_.is_open()) {
+        if (disposed_) {
+          break;
+        }
         command_stream_.run_one();
       }
       send_notify(lrdb::notify_message("running"));
@@ -162,8 +176,13 @@ class basic_server {
         debugger_.pause_now();
       }
       if (wait_for_connect_) {
-        if (!wait_for_connection_with_timeout()) {
-          ++metrics_.connection_wait_timeouts;
+        const bool block_for_initial_pause =
+            wait_for_initial_pause_connection_ && debugger_.paused() &&
+            !command_stream_.is_open();
+        if (!wait_for_connection(block_for_initial_pause)) {
+          if (!block_for_initial_pause) {
+            ++metrics_.connection_wait_timeouts;
+          }
           return;
         }
       }
@@ -194,7 +213,10 @@ class basic_server {
       command_stream_.close();
       return;
     }
+    const bool was_waiting_for_initial_pause = wait_for_initial_pause_connection_;
     wait_for_connect_ = false;
+    wait_for_initial_pause_connection_ = false;
+    pending_pause_on_error_.store(false);
     has_active_connection_ = true;
     ++metrics_.connections_opened;
     json::object param;
@@ -213,6 +235,12 @@ class basic_server {
     // the paused state so the adapter can correctly show pause UI.
     if (debugger_.paused()) {
       send_pause_status();
+    }
+
+    if (was_waiting_for_initial_pause) {
+      if (std::string(debugger_.pause_reason()) != "entry") {
+        debugger_.unpause();
+      }
     }
   }
 
@@ -257,20 +285,109 @@ class basic_server {
     return send_message(lrdb::message::serialize(message));
   }
 
-  bool wait_for_connection_with_timeout() {
+  void print_status_line(const std::string& text) {
+    if (lua_base_ == nullptr) {
+      return;
+    }
+
+    const int stack_top = lua_base_->Top();
+    lua_base_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_base_->GetField(-1, "Msg");
+    if (!lua_base_->IsType(-1, GarrysMod::Lua::Type::Function)) {
+      lua_base_->Pop(lua_base_->Top() - stack_top);
+      return;
+    }
+
+    lua_base_->PushString(text.c_str());
+    if (lua_base_->PCall(1, 0, 0) != 0) {
+      lua_base_->Pop(1);
+    }
+
+    lua_base_->Pop(lua_base_->Top() - stack_top);
+  }
+
+  bool wait_for_connection(bool block_until_connected) {
     const auto start = std::chrono::steady_clock::now();
+    const bool show_countdown =
+        block_until_connected && pause_on_activate_timeout_seconds_ > 0;
+    const auto timeout = std::chrono::seconds(pause_on_activate_timeout_seconds_);
+    int last_reported_remaining_seconds = -1;
+    size_t last_countdown_width = 0;
+
+    auto print_countdown = [this, &last_countdown_width](int remaining_seconds) {
+      std::string countdown_line = "[GLuaLS] pause-on-activate countdown: ";
+      countdown_line += std::to_string(remaining_seconds);
+      countdown_line += "s remaining...";
+      if (countdown_line.size() < last_countdown_width) {
+        countdown_line.append(last_countdown_width - countdown_line.size(), ' ');
+      }
+      last_countdown_width = countdown_line.size();
+      countdown_line.push_back('\r');
+      print_status_line(countdown_line);
+    };
+
+    auto finish_countdown_line = [this, &last_countdown_width](
+                                     const std::string& message) {
+      std::string line = message;
+      if (!line.empty() && line.back() == '\n') {
+        line.pop_back();
+      }
+      if (line.size() < last_countdown_width) {
+        line.append(last_countdown_width - line.size(), ' ');
+      }
+      line.push_back('\n');
+      print_status_line(line);
+    };
+
     while (wait_for_connect_ && !command_stream_.is_open()) {
+      if (disposed_) {
+        return false;
+      }
       command_stream_.poll();
       if (command_stream_.is_open()) {
+        if (show_countdown) {
+          const char* pause_reason = debugger_.pause_reason();
+          finish_countdown_line(
+              std::string("[GLuaLS] pause-on-activate debugger connected; ") +
+              (pause_reason != nullptr && std::string(pause_reason) == "entry"
+                   ? "staying paused for entry-stop.\n"
+                   : "wait complete.\n"));
+        }
         return true;
       }
-      if (std::chrono::steady_clock::now() - start >=
-          std::chrono::milliseconds(kConnectionWaitTimeoutMs)) {
+      if (!block_until_connected &&
+          std::chrono::steady_clock::now() - start >=
+              std::chrono::milliseconds(kConnectionWaitTimeoutMs)) {
+        return false;
+      }
+      if (show_countdown) {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        int remaining_seconds =
+            static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                                 timeout - elapsed)
+                                 .count());
+        if (remaining_seconds < 0) {
+          remaining_seconds = 0;
+        }
+
+        if (remaining_seconds != last_reported_remaining_seconds) {
+          print_countdown(remaining_seconds);
+          last_reported_remaining_seconds = remaining_seconds;
+        }
+      }
+
+      if (show_countdown &&
+          std::chrono::steady_clock::now() - start >= timeout) {
+        finish_countdown_line(
+            "[GLuaLS] pause-on-activate timeout expired; continuing.\n");
+        wait_for_connect_ = false;
+        wait_for_initial_pause_connection_ = false;
+        debugger_.unpause();
         return false;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return command_stream_.is_open();
+    return !disposed_ && command_stream_.is_open();
   }
   bool send_response(lrdb::response_message& message) {
     if (message.error) {
@@ -1966,6 +2083,8 @@ class basic_server {
   std::atomic_bool pending_pause_on_error_;
   bool stop_on_error_;
   bool pause_on_activate_;
+  int pause_on_activate_timeout_seconds_;
+  bool wait_for_initial_pause_connection_;
   GarrysMod::Lua::ILuaBase* lua_base_;
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};

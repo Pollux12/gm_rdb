@@ -20,7 +20,7 @@ if(WIN32)
     target_link_libraries(rdb PRIVATE ws2_32)
 endif()
 
-target_include_directories(rdb PRIVATE 
+target_include_directories(rdb PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_BINARY_DIR}/include
     ${CMAKE_CURRENT_LIST_DIR}/../LRDB/include
@@ -33,6 +33,12 @@ target_compile_definitions(rdb PRIVATE
     GM_RDB_VERSION=\"${PROJECT_VERSION}\"
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
 )
+
+if(MSVC)
+    # Use the conforming preprocessor so variadic macros in vendored headers
+    # expand consistently with GCC/Clang.
+    target_compile_options(rdb PRIVATE /Zc:preprocessor)
+endif()
 
 if(WIN32)
     set(GM_RDB_VERSION_RC "${CMAKE_CURRENT_BINARY_DIR}/gm_rdb_version.rc")
@@ -95,6 +101,12 @@ target_compile_definitions(rdb_client PRIVATE
     GM_RDB_VERSION_NUM=${GM_RDB_VERSION_NUM}
     GMOD_CLIENT_MODULE=1
 )
+
+if(MSVC)
+    # Use the conforming preprocessor so variadic macros in vendored headers
+    # expand consistently with GCC/Clang.
+    target_compile_options(rdb_client PRIVATE /Zc:preprocessor)
+endif()
 
 if(WIN32)
     set(GM_RDB_CLIENT_VERSION_RC "${CMAKE_CURRENT_BINARY_DIR}/gmcl_rdb_version.rc")
