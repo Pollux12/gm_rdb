@@ -7,3 +7,6 @@
 [submodule "picojson"]
 	path = picojson
 	url = https://github.com/kazuho/picojson.git
+[submodule "third-party/garrysmod_common"]
+	path = third-party/garrysmod_common
+	url = https://github.com/danielga/garrysmod_common.git
