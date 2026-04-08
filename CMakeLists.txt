@@ -16,7 +16,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # Allow explicit override from CI/local builds, otherwise infer from Git tags.
-set(GM_RDB_FALLBACK_VERSION "1.2.0")
+set(GM_RDB_FALLBACK_VERSION "0.0.9")
 set(GM_RDB_VERSION "" CACHE STRING "gm_rdb semantic version (major.minor.patch)")
 
 if(GM_RDB_VERSION STREQUAL "")
