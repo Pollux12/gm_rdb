@@ -1,36 +1,44 @@
 # gm_rdb
 
-[![Build Status](https://metamann.visualstudio.com/GitHub%20danielga/_apis/build/status/danielga.gm_rdb?branchName=master)](https://metamann.visualstudio.com/GitHub%20danielga/_build/latest?definitionId=17&branchName=master)
+`gm_rdb` adds remote debugging to Garry's Mod.
 
-A Garry's Mod module that creates a Remote DeBugger server.
+It provides two modules:
 
-Provides Lua debugging (using [LRDB](https://github.com/satoren/vscode-lrdb)) and access to the Source engine console.
+- `rdb` for the server
+- `rdb_client` for the client
 
-## Compiling
+Basic Lua API:
 
-The CMake build used in this repository is validated in CI with modern Visual Studio toolchains (currently VS2022 on `windows-latest`) and Ubuntu/macOS runners.
+- `rdb.activate([port])`
+- `rdb.deactivate()`
+- `rdb.Version`
+- `rdb.VersionNum`
 
-On Linux, everything should work fine as is.
+Useful launch flags:
 
-macOS support is experimental. Garry's Mod's native macOS build is expected to load x86_64 modules under Rosetta, so CI only attempts macOS x64 builds. The produced module names still use Garry's Mod's historical `.dll` suffix, for example `gmsv_rdb_osx64.dll` and `gmcl_rdb_osx64.dll`; do not rename them to `.dylib`.
+- `-rdb_allow_remote` to allow non-local debugger connections
+- `-rdb_pause_on_activate [seconds]` to pause when debugging starts
 
-For macOS, any **Xcode (using the GCC compiler)** version *MIGHT* work as long as the **Mac OSX 10.7 SDK** is used.
+Default ports are `21111` for `rdb` and `21112` for `rdb_client`.
 
-These restrictions are not random; they exist because of ABI compatibility reasons.
+## Build
 
-If stuff starts erroring or fails to work, be sure to check the correct line endings (`\n` and such) are present in the files for each OS.
+This project uses CMake and `garrysmod_common`.
 
-When launching Garry's Mod on macOS for debugger testing, the executable is typically inside the app bundle, for example:
-
-```text
-~/Library/Application Support/Steam/steamapps/common/GarrysMod/GarrysMod_Signed.app/Contents/MacOS/GarrysMod_Signed
+```bash
+cmake -S . -B build -DGARRYSMOD_COMMON_PATH=third-party/garrysmod_common
+cmake --build build --target rdb rdb_client --config Release
 ```
 
-## Requirements
+Set `AUTOINSTALL` and `AUTOINSTALL_CLIENT` to copy the built files into a Garry's Mod folder.
 
-This project requires [garrysmod\_common][1], a framework to facilitate the creation of compilations files (Visual Studio, make, XCode, etc). Simply set the environment variable `GARRYSMOD_COMMON` or the premake option `--gmcommon=path` to the path of your local copy of [garrysmod\_common][1].
+## Notes
 
-We also use [SourceSDK2013][2]. The links to [SourceSDK2013][2] point to my own fork of VALVe's repo and for good reason: Garry's Mod has lots of backwards incompatible changes to interfaces and it's much smaller, being perfect for automated build systems like Azure Pipelines (which is used for this project).
+- Windows and Linux are covered by CI.
+- macOS support is experimental.
+- Keep the historical `.dll` suffix on macOS module names.
 
-  [1]: https://github.com/danielga/garrysmod_common
-  [2]: https://github.com/danielga/sourcesdk-minimal
+## Credits
+
+This project started as a fork of [danielga/gm_rdb](https://github.com/danielga/gm_rdb).
+Debugger protocol tooling: [LRDB](https://github.com/satoren/vscode-lrdb)
