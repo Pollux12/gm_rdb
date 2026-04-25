@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           # Find all binary files (.dll for Windows/macOS Garry's Mod modules, .so for Linux)
-          # AUTINSTALL copies them to root, but also check build directories
+          # AUTOINSTALL copies them to root, but also check build directories
           mkdir -p output
           find . -maxdepth 1 \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
           find build \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
