@@ -24,8 +24,9 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-22.04]
+        os: [windows-latest, ubuntu-22.04, macos-13]
         arch: [x64, x86]
         include:
           - os: windows-latest
@@ -35,8 +36,12 @@ jobs:
             arch: x86
             CMAKE_CXX_FLAGS: -m32
             CMAKE_C_FLAGS: -m32
+        exclude:
+          - os: macos-13
+            arch: x86
 
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ startsWith(matrix.os, 'macos-') }}
 
     steps:
       - uses: lukka/get-cmake@latest
@@ -139,7 +144,7 @@ jobs:
       - name: Find and copy binaries
         shell: bash
         run: |
-          # Find all binary files (.dll for Windows, .so for Linux)
+          # Find all binary files (.dll for Windows/macOS Garry's Mod modules, .so for Linux)
           # AUTINSTALL copies them to root, but also check build directories
           mkdir -p output
           find . -maxdepth 1 \( -name '*.dll' -o -name '*.so' \) -exec cp {} output/ \; 2>/dev/null || true
