@@ -45,6 +45,10 @@ if(GM_RDB_VERSION STREQUAL "")
     endif()
 endif()
 
+if(NOT GM_RDB_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "GM_RDB_VERSION must be major.minor.patch, got '${GM_RDB_VERSION}'")
+endif()
+
 message(STATUS "gm_rdb resolved version: ${GM_RDB_VERSION}")
 
 # Get the latest abbreviated commit hash of the working branch

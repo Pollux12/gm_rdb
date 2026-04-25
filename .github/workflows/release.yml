@@ -94,6 +94,8 @@ jobs:
           TAG=""
           if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_NAME}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
           else
             TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
           fi
@@ -107,6 +109,8 @@ jobs:
 
       - name: Configure project
         shell: bash
+        env:
+          RESOLVED_GM_RDB_VERSION: ${{ steps.resolve_version.outputs.version }}
         run: |
           set -euo pipefail
           CMAKE_ARGS=(
@@ -123,8 +127,8 @@ jobs:
           if [[ -n "${{ matrix.CMAKE_C_FLAGS }}" ]]; then
             CMAKE_ARGS+=(-DCMAKE_C_FLAGS="${{ matrix.CMAKE_C_FLAGS }}")
           fi
-          if [[ -n "${{ steps.resolve_version.outputs.version }}" ]]; then
-            CMAKE_ARGS+=(-DGM_RDB_VERSION=${{ steps.resolve_version.outputs.version }})
+          if [[ -n "$RESOLVED_GM_RDB_VERSION" ]]; then
+            CMAKE_ARGS+=("-DGM_RDB_VERSION=$RESOLVED_GM_RDB_VERSION")
           fi
           cmake "${CMAKE_ARGS[@]}"
 

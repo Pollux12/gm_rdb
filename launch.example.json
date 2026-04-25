@@ -33,6 +33,8 @@
             // Automatically stop after launch (defaults to true)
             "stopOnEntry": true,
             // Full path to the executable to launch
+            // macOS experimental x86_64/Rosetta example:
+            // ~/Library/Application Support/Steam/steamapps/common/GarrysMod/GarrysMod_Signed.app/Contents/MacOS/GarrysMod_Signed
             "program": "{FULL PATH TO GARRY'S MOD EXECUTABLE}",
             // Working directory for the program (defaults to program executable directory)
             "cwd": "{DEFAULTS TO FULL PATH OF GARRY'S MOD EXECUTABLE DIRECTORY}",

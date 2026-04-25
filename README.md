@@ -12,11 +12,19 @@ The CMake build used in this repository is validated in CI with modern Visual St
 
 On Linux, everything should work fine as is.
 
+macOS support is experimental. Garry's Mod's native macOS build is expected to load x86_64 modules under Rosetta, so CI only attempts macOS x64 builds. The produced module names still use Garry's Mod's historical `.dll` suffix, for example `gmsv_rdb_osx64.dll` and `gmcl_rdb_osx64.dll`; do not rename them to `.dylib`.
+
 For macOS, any **Xcode (using the GCC compiler)** version *MIGHT* work as long as the **Mac OSX 10.7 SDK** is used.
 
 These restrictions are not random; they exist because of ABI compatibility reasons.
 
 If stuff starts erroring or fails to work, be sure to check the correct line endings (`\n` and such) are present in the files for each OS.
+
+When launching Garry's Mod on macOS for debugger testing, the executable is typically inside the app bundle, for example:
+
+```text
+~/Library/Application Support/Steam/steamapps/common/GarrysMod/GarrysMod_Signed.app/Contents/MacOS/GarrysMod_Signed
+```
 
 ## Requirements
 

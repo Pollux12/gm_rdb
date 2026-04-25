@@ -2,7 +2,13 @@
 file(GLOB_RECURSE SOURCES RELATIVE ${CMAKE_CURRENT_LIST_DIR} *.cpp *.hpp)
 source_group(TREE ${CMAKE_CURRENT_LIST_DIR} PREFIX "Sources" FILES ${SOURCES})
 
-add_library(rdb SHARED ${SOURCES})
+if(APPLE)
+    set(GM_RDB_LIBRARY_TYPE MODULE)
+else()
+    set(GM_RDB_LIBRARY_TYPE SHARED)
+endif()
+
+add_library(rdb ${GM_RDB_LIBRARY_TYPE} ${SOURCES})
 
 math(EXPR GM_RDB_VERSION_NUM
     "${PROJECT_VERSION_MAJOR} * 10000 + ${PROJECT_VERSION_MINOR} * 100 + ${PROJECT_VERSION_PATCH}")
@@ -72,7 +78,7 @@ if(IS_DIRECTORY ${AUTOINSTALL})
 endif()
 
 # --- Client module ---
-add_library(rdb_client SHARED ${SOURCES})
+add_library(rdb_client ${GM_RDB_LIBRARY_TYPE} ${SOURCES})
 
 target_link_libraries(rdb_client PRIVATE
     gmod::common
