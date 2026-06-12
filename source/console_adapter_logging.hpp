@@ -30,7 +30,7 @@ namespace json
 	using namespace ::picojson;
 }
 
-class console_adapter : private ILoggingListener
+class console_adapter
 {
 public:
 	console_adapter( );
@@ -41,14 +41,15 @@ public:
 
 	bool run_command( const std::string &command, std::string &error_message );
 
+	// Called by the immortal logging listener proxy (see console_adapter_logging.cpp)
+	void handle_log( const LoggingContext_t *pContext, const tchar *pMessage );
+
 private:
 	void start( std::unique_lock<std::mutex> &lock );
 
 	void stop( std::unique_lock<std::mutex> &lock );
 
 	void queue_dispatcher( );
-
-	virtual void Log( const LoggingContext_t *pContext, const tchar *pMessage ) override;
 
 	std::mutex m_mutex;
 	std::condition_variable m_condition;
