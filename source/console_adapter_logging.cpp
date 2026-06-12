@@ -7,6 +7,57 @@
 #include <cdll_int.h>
 #include <eiface.h>
 
+// tier0's logging-state stack retains listener pointers across level transitions, so the registered listener must never be freed
+class logging_listener_proxy final : public ILoggingListener
+{
+public:
+	void attach( console_adapter *adapter )
+	{
+		std::lock_guard<std::mutex> lock( m_forward_mutex );
+
+		if( !m_registered )
+		{
+			LoggingSystem_RegisterLoggingListener( this );
+			m_registered = true;
+		}
+
+		m_target = adapter;
+	}
+
+	void detach( console_adapter *adapter )
+	{
+		// Taking the mutex drains in-flight Log forwards before teardown can free the adapter
+		std::lock_guard<std::mutex> lock( m_forward_mutex );
+
+		if( m_target == adapter )
+		{
+			m_target = nullptr;
+		}
+	}
+
+	void Log( const LoggingContext_t *pContext, const tchar *pMessage ) override
+	{
+		std::lock_guard<std::mutex> lock( m_forward_mutex );
+
+		if( m_target != nullptr )
+		{
+			m_target->handle_log( pContext, pMessage );
+		}
+	}
+
+private:
+	std::mutex m_forward_mutex;
+	console_adapter *m_target = nullptr;
+	bool m_registered = false;
+};
+
+static logging_listener_proxy &logging_proxy( )
+{
+	// Leaked on purpose - must outlive any logging state that references it
+	static logging_listener_proxy *proxy = new logging_listener_proxy( );
+	return *proxy;
+}
+
 console_adapter::console_adapter( ) :
 	m_thread_stop( true ),
 	m_accept_logs( false )
@@ -31,14 +82,30 @@ console_adapter::~console_adapter( )
 
 void console_adapter::set_callback( const std::function<void( const json::value &message )> &callback )
 {
-	std::unique_lock<std::mutex> lock( m_mutex );
+	{
+		std::unique_lock<std::mutex> lock( m_mutex );
 
-	m_callback = callback;
+		m_callback = callback;
 
+		if( callback )
+		{
+			start( lock );
+		}
+		else
+		{
+			stop( lock );
+		}
+	}
+
+	// Outside m_mutex: Log holds the proxy mutex then takes m_mutex, so the reverse order here would deadlock
 	if( callback )
-		start( lock );
+	{
+		logging_proxy( ).attach( this );
+	}
 	else
-		stop( lock );
+	{
+		logging_proxy( ).detach( this );
+	}
 }
 bool console_adapter::run_command( const std::string &command, std::string &error_message )
 {
@@ -90,7 +157,6 @@ void console_adapter::start( [[maybe_unused]] std::unique_lock<std::mutex> &lock
 
 	m_accept_logs = true;
 	m_thread_stop = false;
-	LoggingSystem_RegisterLoggingListener( this );
 
 	m_thread = std::thread( &console_adapter::queue_dispatcher, this );
 }
@@ -102,7 +168,6 @@ void console_adapter::stop( std::unique_lock<std::mutex> &lock )
 
 	m_thread_stop = true;
 	m_accept_logs = false;
-	LoggingSystem_UnregisterLoggingListener( this );
 
 	m_messages.clear( );
 
@@ -145,7 +210,7 @@ void console_adapter::queue_dispatcher( )
 	}
 }
 
-void console_adapter::Log( const LoggingContext_t *pContext, const tchar *pMessage )
+void console_adapter::handle_log( const LoggingContext_t *pContext, const tchar *pMessage )
 {
 	if( m_thread_stop || !m_accept_logs )
 		return;
