@@ -87,6 +87,6 @@ if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_compile_definitions(WIN64)
 endif()
 
-find_package(GarrysmodCommon REQUIRED)
+include(FindGarrysmodCommon)
 
 add_subdirectory(source)

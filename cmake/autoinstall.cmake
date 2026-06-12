@@ -1,0 +1,13 @@
+function(autoinstall TARGET DIRECTORY)
+    if(WIN32)
+        SET(LIBRARY_TYPE RUNTIME)
+    else()
+        SET(LIBRARY_TYPE LIBRARY)
+    endif()
+
+    set_target_properties(${TARGET} PROPERTIES ${LIBRARY_TYPE}_OUTPUT_DIRECTORY ${DIRECTORY})
+    foreach(CONFIG ${CMAKE_CONFIGURATION_TYPES})
+        string(TOUPPER ${CONFIG} CONFIG)
+        set_target_properties(${TARGET} PROPERTIES ${LIBRARY_TYPE}_OUTPUT_DIRECTORY_${CONFIG} ${DIRECTORY})
+    endforeach()
+endfunction()

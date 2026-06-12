@@ -12,10 +12,33 @@ on:
       - '**.cmake'
       - '**.txt'
       - '**.json'
+      - '**.gitmodules'
+      - 'third-party/garrysmod_common'
+      - 'third-party/sourcesdk-minimal-x64'
+      - 'cmake/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches:
+      - master
+      - dev
+    paths:
+      - '**.hpp'
+      - '**.h'
+      - '**.cpp'
+      - '**.c'
+      - '**.cmake'
+      - '**.txt'
+      - '**.json'
+      - '**.gitmodules'
+      - 'third-party/garrysmod_common'
+      - 'third-party/sourcesdk-minimal-x64'
+      - 'cmake/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   GIT_BRANCH: ${{ github.ref_type == 'branch' && github.ref_name || 'release' }}
@@ -32,6 +55,9 @@ jobs:
           - os: windows-latest
             arch: x86
             CMAKE_ARCH_FLAG: -A Win32
+          - os: windows-latest
+            arch: x64
+            CMAKE_ARCH_FLAG: -A x64
           - os: ubuntu-22.04
             arch: x86
             CMAKE_CXX_FLAGS: -m32
@@ -55,46 +81,8 @@ jobs:
       - name: Install dependencies Ubuntu x86
         if: ${{ startsWith(matrix.os, 'ubuntu-') && matrix.arch == 'x86' }}
         run: |
-          sudo apt update
-          sudo apt install gcc-multilib g++-multilib
-
-      - name: Download garrysmod_common
-        uses: actions/checkout@v4
-        with:
-          repository: danielga/garrysmod_common
-          ref: ${{ matrix.arch == 'x64' && 'x86-64-support-sourcesdk' || 'master' }}
-          submodules: recursive
-          path: third-party/garrysmod_common
-
-      - name: Download CMake overlay for garrysmod_common
-        uses: actions/checkout@v4
-        with:
-          repository: dankmolot/garrysmod_common
-          ref: ${{ matrix.arch == 'x64' && 'x86-64-cmake' || 'master-cmake' }}
-          submodules: recursive
-          path: third-party/garrysmod_common_cmake_overlay
-
-      - name: Apply CMake overlay
-        shell: bash
-        run: |
-          set -euo pipefail
-          OVERLAY="third-party/garrysmod_common_cmake_overlay"
-          TARGET="third-party/garrysmod_common"
-
-          cp "$OVERLAY/CMakeLists.txt" "$TARGET/CMakeLists.txt"
-          rm -rf "$TARGET/cmake"
-          cp -R "$OVERLAY/cmake" "$TARGET/cmake"
-
-          while IFS= read -r -d '' file; do
-            rel="${file#"$OVERLAY/"}"
-            [[ "$rel" == "CMakeLists.txt" ]] && continue
-            [[ "$rel" == cmake/* ]] && continue
-            target_file="$TARGET/$rel"
-            if [[ ! -f "$target_file" ]]; then
-              mkdir -p "$(dirname "$target_file")"
-              cp "$file" "$target_file"
-            fi
-          done < <(find "$OVERLAY" -type f -name CMakeLists.txt -print0)
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
 
       - name: Resolve gm_rdb version
         id: resolve_version
@@ -117,12 +105,13 @@ jobs:
 
       - name: Configure project
         shell: bash
+        env:
+          RESOLVED_GM_RDB_VERSION: ${{ steps.resolve_version.outputs.version }}
         run: |
           set -euo pipefail
           CMAKE_ARGS=(
             ${{matrix.CMAKE_ARCH_FLAG}}
             -B build
-            -DGARRYSMOD_COMMON_PATH=third-party/garrysmod_common
             -DAUTOINSTALL=.
             -DGIT_BRANCH=${{env.GIT_BRANCH}}
             -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
@@ -133,8 +122,8 @@ jobs:
           if [[ -n "${{ matrix.CMAKE_C_FLAGS }}" ]]; then
             CMAKE_ARGS+=(-DCMAKE_C_FLAGS="${{ matrix.CMAKE_C_FLAGS }}")
           fi
-          if [[ -n "${{ steps.resolve_version.outputs.version }}" ]]; then
-            CMAKE_ARGS+=(-DGM_RDB_VERSION=${{ steps.resolve_version.outputs.version }})
+          if [[ -n "$RESOLVED_GM_RDB_VERSION" ]]; then
+            CMAKE_ARGS+=("-DGM_RDB_VERSION=$RESOLVED_GM_RDB_VERSION")
           fi
           cmake "${CMAKE_ARGS[@]}"
 
@@ -158,6 +147,10 @@ jobs:
             echo "Expected gmcl_rdb artifact was not produced."
             exit 1
           fi
+          if ! find output -maxdepth 1 -type f -name 'gmsv_rdb*' | grep -q .; then
+            echo "Expected gmsv_rdb artifact was not produced."
+            exit 1
+          fi
 
       - name: Strip debug information from binaries and keep them outside (Ubuntu)
         if: ${{ startsWith(matrix.os, 'ubuntu-') }}
@@ -172,5 +165,3 @@ jobs:
           name: ${{matrix.os}}-${{matrix.arch}}-${{env.BUILD_TYPE}}
           path: output/*
           if-no-files-found: error
-
-

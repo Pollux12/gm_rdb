@@ -10,3 +10,7 @@
 [submodule "third-party/garrysmod_common"]
 	path = third-party/garrysmod_common
 	url = https://github.com/danielga/garrysmod_common.git
+[submodule "third-party/sourcesdk-minimal-x64"]
+	path = third-party/sourcesdk-minimal-x64
+	url = https://github.com/danielga/sourcesdk-minimal.git
+	branch = x86-64-branch
