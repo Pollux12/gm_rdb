@@ -13,6 +13,8 @@ on:
       - '**.txt'
       - '**.json'
       - '**.gitmodules'
+      - 'third-party/garrysmod_common'
+      - 'third-party/sourcesdk-minimal-x64'
       - 'cmake/**'
       - '.github/workflows/build.yml'
   pull_request:
@@ -28,6 +30,8 @@ on:
       - '**.txt'
       - '**.json'
       - '**.gitmodules'
+      - 'third-party/garrysmod_common'
+      - 'third-party/sourcesdk-minimal-x64'
       - 'cmake/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:

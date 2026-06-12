@@ -23,7 +23,7 @@ Default ports are `21111` for `rdb` and `21112` for `rdb_client`.
 
 ## Build
 
-This project uses CMake and [`garrysmod_common`](https://github.com/danielga/garrysmod_common) (pinned as a submodule; the CMake glue for it lives in `cmake/FindGarrysmodCommon.cmake` since upstream is premake-only). 64-bit builds use a second submodule, `third-party/sourcesdk-minimal-x64`, which carries the 64-bit Source SDK link libraries.
+This project uses CMake (`cmake/FindGarrysmodCommon.cmake`) and [`garrysmod_common`](https://github.com/danielga/garrysmod_common). 64-bit builds use a second submodule, `third-party/sourcesdk-minimal-x64`, which carries the 64-bit Source SDK link libraries.
 
 ```bash
 git submodule update --init --recursive
