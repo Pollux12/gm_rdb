@@ -22,6 +22,9 @@ jobs:
           - os: windows-latest
             arch: x86
             CMAKE_ARCH_FLAG: -A Win32
+          - os: windows-latest
+            arch: x64
+            CMAKE_ARCH_FLAG: -A x64
           - os: ubuntu-22.04
             arch: x86
             CMAKE_CXX_FLAGS: -m32
@@ -45,46 +48,8 @@ jobs:
       - name: Install dependencies Ubuntu x86
         if: ${{ startsWith(matrix.os, 'ubuntu-') && matrix.arch == 'x86' }}
         run: |
-          sudo apt update
-          sudo apt install gcc-multilib g++-multilib
-
-      - name: Download garrysmod_common
-        uses: actions/checkout@v4
-        with:
-          repository: danielga/garrysmod_common
-          ref: ${{ matrix.arch == 'x64' && 'x86-64-support-sourcesdk' || 'master' }}
-          submodules: recursive
-          path: third-party/garrysmod_common
-
-      - name: Download CMake overlay for garrysmod_common
-        uses: actions/checkout@v4
-        with:
-          repository: dankmolot/garrysmod_common
-          ref: ${{ matrix.arch == 'x64' && 'x86-64-cmake' || 'master-cmake' }}
-          submodules: recursive
-          path: third-party/garrysmod_common_cmake_overlay
-
-      - name: Apply CMake overlay
-        shell: bash
-        run: |
-          set -euo pipefail
-          OVERLAY="third-party/garrysmod_common_cmake_overlay"
-          TARGET="third-party/garrysmod_common"
-
-          cp "$OVERLAY/CMakeLists.txt" "$TARGET/CMakeLists.txt"
-          rm -rf "$TARGET/cmake"
-          cp -R "$OVERLAY/cmake" "$TARGET/cmake"
-
-          while IFS= read -r -d '' file; do
-            rel="${file#"$OVERLAY/"}"
-            [[ "$rel" == "CMakeLists.txt" ]] && continue
-            [[ "$rel" == cmake/* ]] && continue
-            target_file="$TARGET/$rel"
-            if [[ ! -f "$target_file" ]]; then
-              mkdir -p "$(dirname "$target_file")"
-              cp "$file" "$target_file"
-            fi
-          done < <(find "$OVERLAY" -type f -name CMakeLists.txt -print0)
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
 
       - name: Resolve gm_rdb version
         id: resolve_version
@@ -116,7 +81,6 @@ jobs:
           CMAKE_ARGS=(
             ${{matrix.CMAKE_ARCH_FLAG}}
             -B build
-            -DGARRYSMOD_COMMON_PATH=third-party/garrysmod_common
             -DAUTOINSTALL=.
             -DGIT_BRANCH=${{env.GIT_BRANCH}}
             -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
@@ -150,6 +114,10 @@ jobs:
         run: |
           if ! find output -maxdepth 1 -type f -name 'gmcl_rdb*' | grep -q .; then
             echo "Expected gmcl_rdb artifact was not produced."
+            exit 1
+          fi
+          if ! find output -maxdepth 1 -type f -name 'gmsv_rdb*' | grep -q .; then
+            echo "Expected gmsv_rdb artifact was not produced."
             exit 1
           fi
 
@@ -226,4 +194,3 @@ jobs:
           prerelease: true
           generate_release_notes: true
           files: release/*
-
