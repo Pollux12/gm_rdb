@@ -13,6 +13,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace rdb
@@ -146,6 +148,23 @@ namespace rdb
 		return false;
 	}
 
+	// The client engine unloads binary modules on disconnect while tier0 can still hold our logging listener - pin the image so engine-held pointers stay valid
+	static bool PinModuleInMemory( )
+	{
+#if defined(_WIN32)
+		HMODULE handle = NULL;
+		return GetModuleHandleExA( GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCSTR>( &PinModuleInMemory ), &handle ) != 0;
+#else
+		Dl_info info;
+		if( dladdr( reinterpret_cast<void *>( &PinModuleInMemory ), &info ) == 0 || info.dli_fname == nullptr )
+		{
+			return false;
+		}
+
+		return dlopen( info.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE ) != nullptr;
+#endif
+	}
+
 	static void RefreshRuntimeOptions( )
 	{
 		runtime_options = RuntimeOptions{ };
@@ -259,6 +278,7 @@ namespace rdb
 
 	static int32_t Initialize( GarrysMod::Lua::ILuaBase *LUA )
 	{
+		const bool module_pinned = PinModuleInMemory( );
 		RefreshRuntimeOptions( );
 
 		metatype = LUA->CreateMetaTable( kGlobalName );
@@ -295,6 +315,11 @@ namespace rdb
 		LUA->SetField( GarrysMod::Lua::INDEX_GLOBAL, kGlobalName );
 
 		PrintStatusLine( LUA, std::string( "[GLuaLS] DEBUG READY: " ) + kGlobalName + " module loaded and enabled.\n" );
+
+		if( !module_pinned )
+		{
+			PrintStatusLine( LUA, std::string( "[GLuaLS] WARN: " ) + kGlobalName + " could not pin its module image in memory; the engine unloading it later may crash.\n" );
+		}
 
 		if( runtime_options.allow_remote_connections )
 			PrintStatusLine( LUA, std::string( "[GLuaLS] " ) + kGlobalName + " network mode: remote connections enabled via " + kAllowRemoteFlag + ".\n" );
