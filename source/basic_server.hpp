@@ -1748,13 +1748,15 @@ class basic_server {
   void emit_error_notification(const std::string& message,
                                const std::string& raw_message,
                                const std::string& fingerprint,
-                               int count) {
+                               int count,
+                               const json::value& timestamp) {
     json::object param;
     param["message"] = json::value(message);
     param["raw_message"] = json::value(raw_message);
     param["fingerprint"] = json::value(fingerprint);
     param["count"] = json::value(static_cast<double>(count));
     param["source"] = json::value("lua");
+    param["timestamp"] = timestamp;
     send_notify(lrdb::notify_message("error", json::value(param)));
   }
 
@@ -1774,8 +1776,16 @@ class basic_server {
     }
 
     const auto aggregated = error_aggregator_.add_error(lua_error);
+    const json::value timestamp =
+        message.is<json::object>() &&
+                message.get<json::object>().count("timestamp") > 0
+            ? message.get("timestamp")
+            : json::value(static_cast<double>(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count()));
     emit_error_notification(lua_error, raw_lua_error, aggregated.first,
-                            aggregated.second);
+                            aggregated.second, timestamp);
 
     // Pause requests are queued and fulfilled from debugger tick context to
     // avoid touching debugger state from console callback threads.

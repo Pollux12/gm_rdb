@@ -7,6 +7,8 @@
 #include <cdll_int.h>
 #include <eiface.h>
 
+#include <chrono>
+
 // tier0's logging-state stack retains listener pointers across level transitions, so the registered listener must never be freed
 class logging_listener_proxy final : public ILoggingListener
 {
@@ -237,6 +239,9 @@ void console_adapter::handle_log( const LoggingContext_t *pContext, const tchar 
 	param["severity"] = json::value( static_cast<double>( pContext->m_Severity ) );
 	param["color"] = json::value( jcolor );
 	param["message"] = json::value( pMessage );
+	param["timestamp"] = json::value( static_cast<double>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now( ).time_since_epoch( ) ).count( ) ) );
 
 	m_messages.emplace_back( std::move( param ) );
 

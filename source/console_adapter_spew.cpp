@@ -7,6 +7,8 @@
 #include <cdll_int.h>
 #include <eiface.h>
 
+#include <chrono>
+
 SpewOutputFunc_t console_adapter::s_original_spew = nullptr;
 std::atomic_bool console_adapter::s_hook_active = false;
 std::mutex console_adapter::s_mutex;
@@ -196,6 +198,9 @@ SpewRetval_t console_adapter::Log( SpewType_t spewType, const tchar *pMsg )
 	param["severity"] = json::value( static_cast<double>( GetSpewOutputLevel( ) ) );
 	param["color"] = json::value( jcolor );
 	param["message"] = json::value( pMsg );
+	param["timestamp"] = json::value( static_cast<double>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now( ).time_since_epoch( ) ).count( ) ) );
 
 	s_messages.emplace_back( std::move( param ) );
 
