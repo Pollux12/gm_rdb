@@ -678,7 +678,8 @@ class basic_server {
 #ifndef GMOD_CLIENT_MODULE
   bool invoke_gluals_function(const char* function_name,
                               const std::vector<std::string>& args,
-                              std::string& out_error) {
+                              std::string& out_error,
+                              std::string* out_result = nullptr) {
     if (lua_base_ == nullptr) {
       out_error = "lua interface unavailable";
       return false;
@@ -737,6 +738,14 @@ class basic_server {
       return false;
     }
 
+    if (out_result != nullptr &&
+        lua_base_->IsType(-1, GarrysMod::Lua::Type::String)) {
+      const char* result = lua_base_->GetString(-1);
+      if (result != nullptr) {
+        *out_result = result;
+      }
+    }
+
     lua_base_->Pop(2);
     restore_stack();
     return true;
@@ -782,12 +791,24 @@ class basic_server {
                            error_data("request", "chunk_size"));
       return send_response(response);
     }
+    if (chunk.find('\0') != std::string::npos) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "lua chunk contains a null byte", "run_lua",
+                           error_data("request", "lua"));
+      return send_response(response);
+    }
 
     std::string bridge_error;
-    if (!invoke_gluals_function("runLua", {realm, chunk}, bridge_error)) {
+    std::string bridge_result;
+    if (!invoke_gluals_function("runLua", {realm, chunk}, bridge_error,
+                                &bridge_result)) {
       set_structured_error(response, lrdb::response_error::InternalError,
                            "failed to execute lua", "run_lua",
                            error_data("request", "runtime", bridge_error));
+    } else if (!bridge_result.empty()) {
+      json::value result;
+      const std::string parse_error = json::parse(result, bridge_result);
+      response.result = parse_error.empty() ? result : json::value(bridge_result);
     }
 
     return send_response(response);
@@ -831,6 +852,12 @@ class basic_server {
                            error_data("request", "file"));
       return send_response(response);
     }
+    if (file.find('\0') != std::string::npos) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "file path contains a null byte", "run_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
 
     std::string bridge_error;
     if (!invoke_gluals_function("runFile", {realm, file}, bridge_error)) {
@@ -868,6 +895,12 @@ class basic_server {
     if (file.empty() || file.size() > kMaxLuaFilePathBytes) {
       set_structured_error(response, lrdb::response_error::InvalidParams,
                            "invalid params", "refresh_file",
+                           error_data("request", "file"));
+      return send_response(response);
+    }
+    if (file.find('\0') != std::string::npos) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "file path contains a null byte", "refresh_file",
                            error_data("request", "file"));
       return send_response(response);
     }
