@@ -21,6 +21,13 @@ Useful launch flags:
 
 Default ports are `21111` for `rdb` and `21112` for `rdb_client`.
 
+Debugger protocol `gmod-3` adds realm-specific runtime support used by the GLuaLS MCP host:
+
+- The server module exposes bounded map, gamemode, dedicated/single-player, and player-count status.
+- The client module can capture one JPEG from its attached graphical client through the engine `jpeg` command.
+- Screenshot files use internal names, are limited to 1 MiB, time out after five seconds, and are deleted after success or failure.
+- The server build does not expose screenshot capture, and the client build does not expose server runtime status.
+
 ## Build
 
 This project uses CMake (`cmake/FindGarrysmodCommon.cmake`) and [`garrysmod_common`](https://github.com/danielga/garrysmod_common). 64-bit builds use a second submodule, `third-party/sourcesdk-minimal-x64`, which carries the 64-bit Source SDK link libraries.

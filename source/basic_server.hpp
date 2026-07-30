@@ -22,6 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include <filesystem.h>
+#include <GarrysMod/InterfacePointers.hpp>
+
 #include <lrdb/debugger.hpp>
 #include <lrdb/message.hpp>
 
@@ -35,7 +38,7 @@
 #endif
 #include "error_aggregator.hpp"
 
-#define LRDB_SERVER_PROTOCOL_VERSION "gmod-2"
+#define LRDB_SERVER_PROTOCOL_VERSION "gmod-3"
 
 #ifndef GM_RDB_VERSION
 #define GM_RDB_VERSION "0.0.0"
@@ -90,6 +93,9 @@ class basic_server {
   /// @param lua_State*  debug target
   void reset(lua_State* L = nullptr,
              GarrysMod::Lua::ILuaBase* lua_base = nullptr) {
+#ifdef GMOD_CLIENT_MODULE
+    clear_pending_screenshot();
+#endif
     attached_ = L != nullptr;
     disposed_ = false;
     pending_pause_on_error_.store(false);
@@ -122,6 +128,9 @@ class basic_server {
       return;
     }
     disposed_ = true;
+#ifdef GMOD_CLIENT_MODULE
+    clear_pending_screenshot();
+#endif
     attached_ = false;
     wait_for_connect_ = true;
     wait_for_initial_pause_connection_ = false;
@@ -175,6 +184,9 @@ class basic_server {
           !debugger_.paused()) {
         debugger_.pause_now();
       }
+#ifdef GMOD_CLIENT_MODULE
+      poll_pending_screenshot();
+#endif
       if (wait_for_connect_) {
         const bool block_for_initial_pause =
             wait_for_initial_pause_connection_ && debugger_.paused() &&
@@ -199,6 +211,9 @@ class basic_server {
       }
       has_active_connection_ = false;
       wait_for_connect_ = true;
+#ifdef GMOD_CLIENT_MODULE
+      clear_pending_screenshot();
+#endif
       debugger_.unpause();
     };
     command_stream_.on_error = [this](const std::string&) { ++metrics_.stream_errors; };
@@ -1862,7 +1877,347 @@ class basic_server {
     return json::value(metrics);
   }
 
+#ifdef GMOD_CLIENT_MODULE
+  static std::string encode_base64(const std::vector<unsigned char>& data) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve(((data.size() + 2) / 3) * 4);
+    for (size_t index = 0; index < data.size(); index += 3) {
+      const uint32_t first = data[index];
+      const uint32_t second = index + 1 < data.size() ? data[index + 1] : 0;
+      const uint32_t third = index + 2 < data.size() ? data[index + 2] : 0;
+      const uint32_t value = (first << 16) | (second << 8) | third;
+      encoded.push_back(alphabet[(value >> 18) & 0x3f]);
+      encoded.push_back(alphabet[(value >> 12) & 0x3f]);
+      encoded.push_back(index + 1 < data.size() ? alphabet[(value >> 6) & 0x3f]
+                                                : '=');
+      encoded.push_back(index + 2 < data.size() ? alphabet[value & 0x3f] : '=');
+    }
+    return encoded;
+  }
+
+  static bool parse_jpeg_dimensions(const std::vector<unsigned char>& data,
+                                    int& width, int& height) {
+    if (data.size() < 4 || data[0] != 0xff || data[1] != 0xd8) {
+      return false;
+    }
+    size_t index = 2;
+    while (index + 3 < data.size()) {
+      if (data[index] != 0xff) {
+        ++index;
+        continue;
+      }
+      while (index < data.size() && data[index] == 0xff) {
+        ++index;
+      }
+      if (index >= data.size()) {
+        return false;
+      }
+      const unsigned char marker = data[index++];
+      if (marker == 0xd8 || marker == 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+        continue;
+      }
+      if (index + 1 >= data.size()) {
+        return false;
+      }
+      const size_t segment_length =
+          (static_cast<size_t>(data[index]) << 8) | data[index + 1];
+      if (segment_length < 2 || index + segment_length > data.size()) {
+        return false;
+      }
+      const bool is_start_of_frame =
+          (marker >= 0xc0 && marker <= 0xc3) ||
+          (marker >= 0xc5 && marker <= 0xc7) ||
+          (marker >= 0xc9 && marker <= 0xcb) ||
+          (marker >= 0xcd && marker <= 0xcf);
+      if (is_start_of_frame) {
+        if (segment_length < 7) {
+          return false;
+        }
+        height = (static_cast<int>(data[index + 3]) << 8) | data[index + 4];
+        width = (static_cast<int>(data[index + 5]) << 8) | data[index + 6];
+        return width > 0 && height > 0;
+      }
+      index += segment_length;
+    }
+    return false;
+  }
+
+  void remove_screenshot_file(const std::string& path) {
+    IFileSystem* filesystem = InterfacePointers::FileSystem();
+    if (filesystem != nullptr && !path.empty()) {
+      filesystem->RemoveFile(path.c_str(), "GAME");
+    }
+  }
+
+  void clear_pending_screenshot() {
+    if (pending_screenshot_.active) {
+      remove_screenshot_file(pending_screenshot_.path);
+    }
+    pending_screenshot_ = pending_screenshot_state();
+  }
+
+  void fail_pending_screenshot(const std::string& message,
+                               const std::string& category) {
+    if (!pending_screenshot_.active) {
+      return;
+    }
+    lrdb::response_message response;
+    response.id = pending_screenshot_.request_id;
+    set_structured_error(response, lrdb::response_error::InternalError,
+                         message, "capture_screenshot",
+                         error_data("capture", category));
+    clear_pending_screenshot();
+    send_response(response);
+  }
+
+  void poll_pending_screenshot() {
+    if (!pending_screenshot_.active) {
+      return;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() -
+                         pending_screenshot_.started_at;
+    if (elapsed >= std::chrono::milliseconds(kScreenshotTimeoutMs)) {
+      fail_pending_screenshot(
+          "screenshot capture timed out; the client may be minimized or not rendering",
+          "timeout");
+      return;
+    }
+
+    IFileSystem* filesystem = InterfacePointers::FileSystem();
+    if (filesystem == nullptr ||
+        !filesystem->FileExists(pending_screenshot_.path.c_str(), "GAME")) {
+      return;
+    }
+    FileHandle_t file =
+        filesystem->Open(pending_screenshot_.path.c_str(), "rb", "GAME");
+    if (file == FILESYSTEM_INVALID_HANDLE) {
+      return;
+    }
+    const unsigned long long size = filesystem->Size(file);
+    if (size == 0 || size != pending_screenshot_.last_size) {
+      pending_screenshot_.last_size = size;
+      filesystem->Close(file);
+      return;
+    }
+    if (size > kMaxScreenshotBytes) {
+      filesystem->Close(file);
+      fail_pending_screenshot("screenshot exceeds the 1 MiB limit", "size");
+      return;
+    }
+
+    std::vector<unsigned char> bytes(static_cast<size_t>(size));
+    const int read = filesystem->Read(bytes.data(), static_cast<int>(size), file);
+    filesystem->Close(file);
+    if (read != static_cast<int>(size)) {
+      pending_screenshot_.last_size = 0;
+      return;
+    }
+    if (bytes.size() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 ||
+        bytes[bytes.size() - 2] != 0xff || bytes.back() != 0xd9) {
+      pending_screenshot_.last_size = 0;
+      return;
+    }
+
+    lrdb::response_message response;
+    response.id = pending_screenshot_.request_id;
+    json::object result;
+    result["mimeType"] = json::value("image/jpeg");
+    result["data"] = json::value(encode_base64(bytes));
+    result["byteCount"] = json::value(static_cast<double>(bytes.size()));
+    result["quality"] = json::value(static_cast<double>(pending_screenshot_.quality));
+    int width = 0;
+    int height = 0;
+    if (parse_jpeg_dimensions(bytes, width, height)) {
+      result["width"] = json::value(static_cast<double>(width));
+      result["height"] = json::value(static_cast<double>(height));
+    }
+    response.result = json::value(result);
+    clear_pending_screenshot();
+    send_response(response);
+  }
+
+  bool capture_screenshot_request(lrdb::response_message& response,
+                                  const json::value& param) {
+    if (!ensure_attached(response, "capture_screenshot")) {
+      return send_response(response);
+    }
+    if (debugger_.paused()) {
+      set_structured_error(response, lrdb::response_error::InvalidRequest,
+                           "client debugger is paused", "capture_screenshot",
+                           error_data("session", "state", "paused"));
+      return send_response(response);
+    }
+    if (pending_screenshot_.active) {
+      set_structured_error(response, lrdb::response_error::InvalidRequest,
+                           "a screenshot capture is already pending",
+                           "capture_screenshot",
+                           error_data("capture", "state", "busy"));
+      return send_response(response);
+    }
+    if (!param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "capture_screenshot",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+    const json::value& quality_value = param.get("quality");
+    int quality = 0;
+    if (!try_parse_non_negative_int(quality_value, quality) || quality < 1 ||
+        quality > 100) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "quality must be an integer from 1 through 100",
+                           "capture_screenshot",
+                           error_data("request", "quality"));
+      return send_response(response);
+    }
+
+    const uint64_t capture_id = ++screenshot_sequence_;
+    const uint64_t monotonic_id = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    const std::string name = "gluals_mcp_" + std::to_string(monotonic_id) +
+                             "_" + std::to_string(capture_id);
+    const std::string path = "screenshots/" + name + ".jpg";
+    remove_screenshot_file(path);
+    pending_screenshot_.active = true;
+    pending_screenshot_.request_id = response.id;
+    pending_screenshot_.path = path;
+    pending_screenshot_.quality = quality;
+    pending_screenshot_.started_at = std::chrono::steady_clock::now();
+
+    std::string dispatch_error;
+    const std::string command =
+        "jpeg " + name + " " + std::to_string(quality);
+    if (!console_adapter_.run_command(command, dispatch_error)) {
+      set_structured_error(response, lrdb::response_error::InternalError,
+                           "failed to dispatch screenshot capture",
+                           "capture_screenshot",
+                           error_data("capture", "dispatch", dispatch_error));
+      clear_pending_screenshot();
+      return send_response(response);
+    }
+    return true;
+  }
+#endif  // GMOD_CLIENT_MODULE
+
 #ifndef GMOD_CLIENT_MODULE
+  bool call_status_function(const char* table_name, const char* function_name,
+                            int expected_type,
+                            json::value& result, std::string& error) {
+    const int stack_top = lua_base_->Top();
+    const auto restore_stack = [&]() {
+      const int values_to_pop = lua_base_->Top() - stack_top;
+      if (values_to_pop > 0) {
+        lua_base_->Pop(values_to_pop);
+      }
+    };
+
+    lua_base_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    lua_base_->GetField(-1, table_name);
+    if (!lua_base_->IsType(-1, GarrysMod::Lua::Type::Table)) {
+      error = std::string(table_name) + " table is unavailable";
+      restore_stack();
+      return false;
+    }
+    lua_base_->GetField(-1, function_name);
+    if (!lua_base_->IsType(-1, GarrysMod::Lua::Type::Function)) {
+      error = std::string(table_name) + "." + function_name +
+              " is unavailable";
+      restore_stack();
+      return false;
+    }
+    if (lua_base_->PCall(0, 1, 0) != 0) {
+      const char* lua_error = lua_base_->GetString(-1);
+      error = std::string(table_name) + "." + function_name +
+              " failed: " + (lua_error != nullptr ? lua_error : "unknown error");
+      if (error.size() > kMaxRuntimeStatusStringBytes) {
+        error.resize(kMaxRuntimeStatusStringBytes);
+      }
+      restore_stack();
+      return false;
+    }
+    if (!lua_base_->IsType(-1, expected_type)) {
+      error = std::string(table_name) + "." + function_name +
+              " returned an unexpected type";
+      restore_stack();
+      return false;
+    }
+
+    if (expected_type == GarrysMod::Lua::Type::String) {
+      const char* value = lua_base_->GetString(-1);
+      std::string text = value != nullptr ? value : "";
+      if (text.size() > kMaxRuntimeStatusStringBytes) {
+        text.resize(kMaxRuntimeStatusStringBytes);
+      }
+      result = json::value(text);
+    } else if (expected_type == GarrysMod::Lua::Type::Bool) {
+      result = json::value(lua_base_->GetBool(-1));
+    } else if (expected_type == GarrysMod::Lua::Type::Number) {
+      const double value = lua_base_->GetNumber(-1);
+      if (!std::isfinite(value) || value < 0 ||
+          value > static_cast<double>(std::numeric_limits<int>::max()) ||
+          std::floor(value) != value) {
+        error = std::string(table_name) + "." + function_name +
+                " returned an invalid number";
+        restore_stack();
+        return false;
+      }
+      result = json::value(value);
+    }
+
+    restore_stack();
+    return true;
+  }
+
+  bool get_runtime_status_request(lrdb::response_message& response,
+                                  const json::value& param) {
+    if (!ensure_attached(response, "get_runtime_status") ||
+        !ensure_lua_interface(response, "get_runtime_status")) {
+      return send_response(response);
+    }
+    if (!param.is<json::null>() && !param.is<json::object>()) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "invalid params", "get_runtime_status",
+                           error_data("request", "params"));
+      return send_response(response);
+    }
+
+    struct status_field {
+      const char* output_name;
+      const char* table_name;
+      const char* function_name;
+      int expected_type;
+    };
+    const status_field fields[] = {
+        {"map", "game", "GetMap", GarrysMod::Lua::Type::String},
+        {"gamemode", "engine", "ActiveGamemode", GarrysMod::Lua::Type::String},
+        {"dedicated", "game", "IsDedicated", GarrysMod::Lua::Type::Bool},
+        {"singlePlayer", "game", "SinglePlayer", GarrysMod::Lua::Type::Bool},
+        {"playerCount", "player", "GetCount", GarrysMod::Lua::Type::Number},
+        {"maxPlayers", "game", "MaxPlayers", GarrysMod::Lua::Type::Number},
+    };
+
+    json::object status;
+    for (const auto& field : fields) {
+      json::value value;
+      std::string error;
+      if (!call_status_function(field.table_name, field.function_name,
+                                field.expected_type, value, error)) {
+        set_structured_error(response, lrdb::response_error::InternalError,
+                             "failed to collect runtime status",
+                             "get_runtime_status",
+                             error_data("runtime", field.output_name, error));
+        return send_response(response);
+      }
+      status[field.output_name] = value;
+    }
+    response.result = json::value(status);
+    return send_response(response);
+  }
+
   bool command_request(lrdb::response_message& response,
                            const json::value& param) {
     if (!ensure_attached(response, "command")) {
@@ -2066,6 +2421,9 @@ class basic_server {
         LRDB_DEBUG_COMMAND_TABLE(run_lua),
         LRDB_DEBUG_COMMAND_TABLE(run_file),
         LRDB_DEBUG_COMMAND_TABLE(refresh_file),
+        LRDB_DEBUG_COMMAND_TABLE(get_runtime_status),
+#else
+        LRDB_DEBUG_COMMAND_TABLE(capture_screenshot),
 #endif  // !GMOD_CLIENT_MODULE
         LRDB_DEBUG_COMMAND_TABLE(clear_error_cache),
 #undef LRDB_DEBUG_COMMAND_TABLE
@@ -2118,6 +2476,11 @@ class basic_server {
   static constexpr size_t kMaxLuaFilePathBytes = 1024;
   static constexpr size_t kMaxConsoleCommandBytes = 2048;
   static constexpr size_t kMaxConsoleCommandNameBytes = 128;
+  static constexpr size_t kMaxRuntimeStatusStringBytes = 1024;
+#ifdef GMOD_CLIENT_MODULE
+  static constexpr unsigned long long kMaxScreenshotBytes = 1024 * 1024;
+  static constexpr int kScreenshotTimeoutMs = 5000;
+#endif
 
   bool wait_for_connect_;
   bool attached_;
@@ -2129,6 +2492,17 @@ class basic_server {
   int pause_on_activate_timeout_seconds_;
   bool wait_for_initial_pause_connection_;
   GarrysMod::Lua::ILuaBase* lua_base_;
+#ifdef GMOD_CLIENT_MODULE
+  struct pending_screenshot_state {
+    bool active = false;
+    json::value request_id;
+    std::string path;
+    int quality = 0;
+    unsigned long long last_size = 0;
+    std::chrono::steady_clock::time_point started_at;
+  } pending_screenshot_;
+  uint64_t screenshot_sequence_ = 0;
+#endif
   struct reliability_metrics {
     std::atomic<uint64_t> connections_opened{0};
     std::atomic<uint64_t> connections_closed{0};
