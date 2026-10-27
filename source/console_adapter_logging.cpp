@@ -3,11 +3,35 @@
 #if __has_include(<tier0/logging.h>)
 
 #include <GarrysMod/InterfacePointers.hpp>
+#include <GarrysMod/ModuleLoader.hpp>
 
 #include <cdll_int.h>
 #include <eiface.h>
 
-// tier0's logging-state stack retains listener pointers across level transitions, so the registered listener must never be freed
+namespace
+{
+
+enum SpewRetvalCompat_t
+{
+	SPEW_COMPAT_DEBUGGER = 0,
+	SPEW_COMPAT_CONTINUE,
+	SPEW_COMPAT_ABORT
+};
+
+using RegisterLoggingListenerFn = void ( * )( ILoggingListener * );
+using SpewOutputFuncCompat_t = SpewRetvalCompat_t ( * )( int spewType, const tchar *pMsg );
+using SpewOutputSetterFn = void ( * )( SpewOutputFuncCompat_t func );
+using GetSpewOutputFuncFn = SpewOutputFuncCompat_t ( * )( );
+using GetSpewOutputGroupFn = const tchar *( * )( );
+using GetSpewOutputLevelFn = int ( * )( );
+using GetSpewOutputColorFn = const Color *( * )( );
+
+} // namespace
+
+// tier0's logging-state stack (on x86-64 beta) and spew hook chain (on main x64)
+// retain listener pointers across level transitions, so the registered listener must never be freed.
+// Symbols are resolved dynamically from tier0 so the same win64 binary works on both
+// main branch (classic Spew API) and x86-64 beta (LoggingSystem API).
 class logging_listener_proxy final : public ILoggingListener
 {
 public:
@@ -17,7 +41,7 @@ public:
 
 		if( !m_registered )
 		{
-			LoggingSystem_RegisterLoggingListener( this );
+			register_with_tier0( );
 			m_registered = true;
 		}
 
@@ -46,9 +70,64 @@ public:
 	}
 
 private:
+	void register_with_tier0( )
+	{
+		SourceSDK::ModuleLoader loader( "tier0" );
+		if( !loader.IsValid( ) )
+			return;
+
+		auto register_logging = reinterpret_cast<RegisterLoggingListenerFn>(
+			loader.GetSymbol( "LoggingSystem_RegisterLoggingListener" ) );
+		if( register_logging != nullptr )
+		{
+			register_logging( this );
+			return;
+		}
+
+		auto set_spew = reinterpret_cast<SpewOutputSetterFn>(
+			loader.GetSymbol( "SpewOutputFunc" ) );
+		auto get_spew = reinterpret_cast<GetSpewOutputFuncFn>(
+			loader.GetSymbol( "GetSpewOutputFunc" ) );
+		m_get_spew_group = reinterpret_cast<GetSpewOutputGroupFn>(
+			loader.GetSymbol( "GetSpewOutputGroup" ) );
+		m_get_spew_level = reinterpret_cast<GetSpewOutputLevelFn>(
+			loader.GetSymbol( "GetSpewOutputLevel" ) );
+		m_get_spew_color = reinterpret_cast<GetSpewOutputColorFn>(
+			loader.GetSymbol( "GetSpewOutputColor" ) );
+
+		if( set_spew != nullptr && get_spew != nullptr )
+		{
+			m_original_spew = get_spew( );
+			set_spew( &logging_listener_proxy::SpewCallback );
+		}
+	}
+
+	static SpewRetvalCompat_t SpewCallback( int spewType, const tchar *pMsg );
+
+	SpewRetvalCompat_t handle_spew_callback( int spewType, const tchar *pMsg )
+	{
+		SpewOutputFuncCompat_t original = m_original_spew;
+		{
+			std::lock_guard<std::mutex> lock( m_forward_mutex );
+			if( m_target != nullptr && pMsg != nullptr )
+			{
+				const tchar *group = m_get_spew_group ? m_get_spew_group( ) : nullptr;
+				const int severity = m_get_spew_level ? m_get_spew_level( ) : 0;
+				const Color *color = m_get_spew_color ? m_get_spew_color( ) : nullptr;
+				m_target->handle_spew( spewType, group, severity, color, pMsg );
+			}
+		}
+
+		return original ? original( spewType, pMsg ? pMsg : "" ) : SPEW_COMPAT_CONTINUE;
+	}
+
 	std::mutex m_forward_mutex;
 	console_adapter *m_target = nullptr;
 	bool m_registered = false;
+	SpewOutputFuncCompat_t m_original_spew = nullptr;
+	GetSpewOutputGroupFn m_get_spew_group = nullptr;
+	GetSpewOutputLevelFn m_get_spew_level = nullptr;
+	GetSpewOutputColorFn m_get_spew_color = nullptr;
 };
 
 static logging_listener_proxy &logging_proxy( )
@@ -56,6 +135,11 @@ static logging_listener_proxy &logging_proxy( )
 	// Leaked on purpose - must outlive any logging state that references it
 	static logging_listener_proxy *proxy = new logging_listener_proxy( );
 	return *proxy;
+}
+
+SpewRetvalCompat_t logging_listener_proxy::SpewCallback( int spewType, const tchar *pMsg )
+{
+	return logging_proxy( ).handle_spew_callback( spewType, pMsg );
 }
 
 console_adapter::console_adapter( ) :
@@ -235,6 +319,37 @@ void console_adapter::handle_log( const LoggingContext_t *pContext, const tchar 
 	json::object param;
 	param["channel_id"] = json::value( static_cast<double>( pContext->m_ChannelID ) );
 	param["severity"] = json::value( static_cast<double>( pContext->m_Severity ) );
+	param["color"] = json::value( jcolor );
+	param["message"] = json::value( pMessage );
+
+	m_messages.emplace_back( std::move( param ) );
+
+	lock.unlock( );
+	m_condition.notify_all( );
+}
+
+void console_adapter::handle_spew( int spew_type, const tchar *group, int severity, const Color *output_color, const tchar *pMessage )
+{
+	if( m_thread_stop || !m_accept_logs )
+		return;
+
+	if( pMessage == nullptr )
+		return;
+
+	std::unique_lock<std::mutex> lock( m_mutex );
+
+	const Color color = output_color ? *output_color : Color( 255, 255, 255, 255 );
+
+	json::object jcolor;
+	jcolor["r"] = json::value( static_cast<double>( color.r( ) ) );
+	jcolor["g"] = json::value( static_cast<double>( color.g( ) ) );
+	jcolor["b"] = json::value( static_cast<double>( color.b( ) ) );
+	jcolor["a"] = json::value( static_cast<double>( color.a( ) ) );
+
+	json::object param;
+	param["channel_id"] = json::value( static_cast<double>( spew_type ) );
+	param["group"] = json::value( group ? group : "" );
+	param["severity"] = json::value( static_cast<double>( severity ) );
 	param["color"] = json::value( jcolor );
 	param["message"] = json::value( pMessage );
 

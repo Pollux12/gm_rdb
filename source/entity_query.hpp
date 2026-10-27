@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,119 @@ class EntityQuery {
 
   picojson::array list_entities(int offset, int limit, int filter_id,
                                 const std::string& filter_class) {
+    return run_in_c_frame([&]() {
+      return list_entities_impl(offset, limit, filter_id, filter_class);
+    });
+  }
+
+  picojson::object get_entity_detail(int entity_index) {
+    return run_in_c_frame(
+        [&]() { return get_entity_detail_impl(entity_index); });
+  }
+
+  picojson::array get_entity_table_entries(int entity_index,
+                                           const std::string& filter) {
+    return run_in_c_frame(
+        [&]() { return get_entity_table_entries_impl(entity_index, filter); });
+  }
+
+  bool set_entity_table_field(int entity_index, const std::string& field_name,
+                              const picojson::value& field_value) {
+    return run_in_c_frame([&]() {
+      return set_entity_table_field_impl(entity_index, field_name, field_value);
+    });
+  }
+
+  picojson::array get_entity_network_var_entries(int entity_index) {
+    return run_in_c_frame(
+        [&]() { return get_entity_network_var_entries_impl(entity_index); });
+  }
+
+  bool set_entity_field(int entity_index, const std::string& field_name,
+                        const picojson::value& field_value) {
+    return run_in_c_frame([&]() {
+      return set_entity_field_impl(entity_index, field_name, field_value);
+    });
+  }
+
+  bool set_entity_network_var(int entity_index, const std::string& var_name,
+                              const picojson::value& field_value) {
+    return run_in_c_frame([&]() {
+      return set_entity_network_var_impl(entity_index, var_name, field_value);
+    });
+  }
+
+  bool set_entity_pos(int entity_index, double x, double y, double z) {
+    return run_in_c_frame(
+        [&]() { return set_entity_pos_impl(entity_index, x, y, z); });
+  }
+
+  bool set_entity_angles(int entity_index, double pitch, double yaw,
+                         double roll) {
+    return run_in_c_frame([&]() {
+      return set_entity_angles_impl(entity_index, pitch, yaw, roll);
+    });
+  }
+
+  bool set_entity_health(int entity_index, double health) {
+    return run_in_c_frame(
+        [&]() { return set_entity_health_impl(entity_index, health); });
+  }
+
+  int last_total() const { return last_total_; }
+
+ private:
+  static void*& active_thunk_state() {
+    static thread_local void* state = nullptr;
+    return state;
+  }
+
+  template <typename Fn>
+  auto run_in_c_frame(Fn&& fn) -> decltype(fn()) {
+    using ResultType = decltype(fn());
+    if (lua_ == nullptr) {
+      return fn();
+    }
+
+    struct ThunkState {
+      Fn* fn_ptr;
+      ResultType result{};
+      std::exception_ptr exception;
+    } state{&fn};
+
+    void* prev_state = active_thunk_state();
+    active_thunk_state() = &state;
+
+    stack_guard guard(lua_);
+    lua_->PushCFunction([](lua_State*) -> int {
+      auto* st = static_cast<ThunkState*>(active_thunk_state());
+      if (st != nullptr && st->fn_ptr != nullptr) {
+        try {
+          st->result = (*st->fn_ptr)();
+        } catch (...) {
+          st->exception = std::current_exception();
+        }
+      }
+      return 0;
+    });
+
+    const int rc = lua_->PCall(0, 0, 0);
+    active_thunk_state() = prev_state;
+
+    if (state.exception) {
+      std::rethrow_exception(state.exception);
+    }
+    if (rc != 0) {
+      std::string error = get_string_or_empty(-1);
+      lua_->Pop(1);
+      throw std::runtime_error(
+          error.empty() ? "unknown lua runtime error" : error);
+    }
+    return state.result;
+  }
+
+  picojson::array list_entities_impl(int offset, int limit, int filter_id,
+                                     const std::string& filter_class) {
     picojson::array entities;
     last_total_ = 0;
     if (lua_ == nullptr || limit < 0) {
@@ -96,7 +210,7 @@ class EntityQuery {
     return entities;
   }
 
-  picojson::object get_entity_detail(int entity_index) {
+  picojson::object get_entity_detail_impl(int entity_index) {
     picojson::object detail;
     detail["index"] = picojson::value(static_cast<double>(entity_index));
     detail["valid"] = picojson::value(false);
@@ -143,7 +257,7 @@ class EntityQuery {
     return detail;
   }
 
-  picojson::array get_entity_table_entries(int entity_index,
+  picojson::array get_entity_table_entries_impl(int entity_index,
                                            const std::string& filter) {
     picojson::array entries;
     if (entity_index <= 0 || lua_ == nullptr) {
@@ -205,7 +319,7 @@ class EntityQuery {
     return entries;
   }
 
-  bool set_entity_table_field(int entity_index, const std::string& field_name,
+  bool set_entity_table_field_impl(int entity_index, const std::string& field_name,
                               const picojson::value& field_value) {
     if (lua_ == nullptr || entity_index <= 0 ||
         !is_valid_field_name(field_name)) {
@@ -241,7 +355,7 @@ class EntityQuery {
     return true;
   }
 
-  picojson::array get_entity_network_var_entries(int entity_index) {
+  picojson::array get_entity_network_var_entries_impl(int entity_index) {
     picojson::array entries;
     if (entity_index <= 0 || lua_ == nullptr) {
       return entries;
@@ -301,7 +415,7 @@ class EntityQuery {
     return entries;
   }
 
-  bool set_entity_field(int entity_index, const std::string& field_name,
+  bool set_entity_field_impl(int entity_index, const std::string& field_name,
                         const picojson::value& field_value) {
     if (lua_ == nullptr || entity_index <= 0 ||
         !is_valid_field_name(field_name)) {
@@ -327,7 +441,7 @@ class EntityQuery {
     return true;
   }
 
-  bool set_entity_network_var(int entity_index, const std::string& var_name,
+  bool set_entity_network_var_impl(int entity_index, const std::string& var_name,
                               const picojson::value& field_value) {
     if (lua_ == nullptr || entity_index <= 0 || !is_valid_field_name(var_name)) {
       return false;
@@ -361,7 +475,7 @@ class EntityQuery {
     return true;
   }
 
-  bool set_entity_pos(int entity_index, double x, double y, double z) {
+  bool set_entity_pos_impl(int entity_index, double x, double y, double z) {
     if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(x) ||
         !std::isfinite(y) || !std::isfinite(z)) {
       return false;
@@ -395,7 +509,7 @@ class EntityQuery {
     return true;
   }
 
-  bool set_entity_angles(int entity_index, double pitch, double yaw,
+  bool set_entity_angles_impl(int entity_index, double pitch, double yaw,
                          double roll) {
     if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(pitch) ||
         !std::isfinite(yaw) || !std::isfinite(roll)) {
@@ -423,7 +537,7 @@ class EntityQuery {
                                           roll);
   }
 
-  bool set_entity_health(int entity_index, double health) {
+  bool set_entity_health_impl(int entity_index, double health) {
     if (lua_ == nullptr || entity_index <= 0 || !std::isfinite(health)) {
       return false;
     }
@@ -454,9 +568,7 @@ class EntityQuery {
     return false;
   }
 
-  int last_total() const { return last_total_; }
 
- private:
   class stack_guard {
    public:
     explicit stack_guard(GarrysMod::Lua::ILuaBase* lua)
@@ -571,6 +683,9 @@ class EntityQuery {
 
   bool invoke_entity_method(int entity_index, const char* method_name,
                             int args, int results) {
+    if (!lua_->IsType(entity_index, GarrysMod::Lua::Type::Entity)) {
+      return false;
+    }
     lua_->GetField(entity_index, method_name);
     if (!is_type(-1, "function")) {
       lua_->Pop(1);
