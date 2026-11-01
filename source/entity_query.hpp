@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <tier1/strtools.h>
 
 #include <picojson.h>
@@ -83,11 +84,6 @@ class EntityQuery {
   int last_total() const { return last_total_; }
 
  private:
-  static void*& active_thunk_state() {
-    static thread_local void* state = nullptr;
-    return state;
-  }
-
   template <typename Fn>
   auto run_in_c_frame(Fn&& fn) -> decltype(fn()) {
     using ResultType = decltype(fn());
@@ -101,24 +97,19 @@ class EntityQuery {
       std::exception_ptr exception;
     } state{&fn};
 
-    void* prev_state = active_thunk_state();
-    active_thunk_state() = &state;
-
     stack_guard guard(lua_);
-    lua_->PushCFunction([](lua_State*) -> int {
-      auto* st = static_cast<ThunkState*>(active_thunk_state());
-      if (st != nullptr && st->fn_ptr != nullptr) {
-        try {
-          st->result = (*st->fn_ptr)();
-        } catch (...) {
-          st->exception = std::current_exception();
-        }
+    lua_->PushCFunction([](lua_State* L) -> int {
+      auto* st = static_cast<ThunkState*>(L->luabase->GetUserdata(1));
+      try {
+        st->result = (*st->fn_ptr)();
+      } catch (const std::exception&) {
+        st->exception = std::current_exception();
       }
       return 0;
     });
+    lua_->PushUserdata(&state);
 
-    const int rc = lua_->PCall(0, 0, 0);
-    active_thunk_state() = prev_state;
+    const int rc = lua_->PCall(1, 0, 0);
 
     if (state.exception) {
       std::rethrow_exception(state.exception);
@@ -129,7 +120,7 @@ class EntityQuery {
       throw std::runtime_error(
           error.empty() ? "unknown lua runtime error" : error);
     }
-    return state.result;
+    return std::move(state.result);
   }
 
   picojson::array list_entities_impl(int offset, int limit, int filter_id,
@@ -351,7 +342,7 @@ class EntityQuery {
       return false;
     }
 
-    lua_->SetField(table_index, field_name.c_str());
+    set_field_protected(table_index, field_name.c_str());
     return true;
   }
 
@@ -437,7 +428,7 @@ class EntityQuery {
       return false;
     }
 
-    lua_->SetField(entity, field_name.c_str());
+    set_field_protected(entity, field_name.c_str());
     return true;
   }
 
@@ -459,7 +450,7 @@ class EntityQuery {
     }
 
     const std::string setter = "Set" + var_name;
-    lua_->GetField(entity, setter.c_str());
+    get_field_protected(entity, setter.c_str());
     if (!is_type(-1, "function")) {
       lua_->Pop(1);
       return false;
@@ -492,7 +483,7 @@ class EntityQuery {
       return false;
     }
 
-    lua_->GetField(entity, "SetPos");
+    get_field_protected(entity, "SetPos");
     if (!is_type(-1, "function")) {
       return false;
     }
@@ -553,7 +544,7 @@ class EntityQuery {
       return false;
     }
 
-    lua_->GetField(entity, "SetHealth");
+    get_field_protected(entity, "SetHealth");
     if (is_type(-1, "function")) {
       try {
         lua_->Push(entity);
@@ -650,6 +641,44 @@ class EntityQuery {
         (error.empty() ? "unknown lua runtime error" : error));
   }
 
+  // Field access runs as Lua code so __index/__newindex errors unwind Lua frames only, never these C++ frames.
+  void get_field_protected(int index, const char* key) {
+    index = abs_index(index);
+    push_registry_chunk("gm_rdb.get_field", "local t, k = ... return t[k]");
+    lua_->Push(index);
+    lua_->PushString(key);
+    pcall_checked(2, 1, key);
+  }
+
+  // Pops the value on the stack top and assigns it to t[key].
+  void set_field_protected(int index, const char* key) {
+    index = abs_index(index);
+    const int value = lua_->Top();
+    push_registry_chunk("gm_rdb.set_field", "local t, k, v = ... t[k] = v");
+    lua_->Push(index);
+    lua_->PushString(key);
+    lua_->Push(value);
+    pcall_checked(3, 0, key);
+    lua_->Pop(1);
+  }
+
+  void push_registry_chunk(const char* name, const char* code) {
+    lua_->PushSpecial(GarrysMod::Lua::SPECIAL_REG);
+    lua_->GetField(-1, name);
+    if (!is_type(-1, "function")) {
+      lua_->Pop(1);
+      lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+      lua_->GetField(-1, "CompileString");
+      lua_->Remove(-2);
+      lua_->PushString(code);
+      lua_->PushString(name);
+      pcall_checked(2, 1, "CompileString");
+      lua_->Push(-1);
+      lua_->SetField(-3, name);
+    }
+    lua_->Remove(-2);
+  }
+
   bool push_ents_table() {
     lua_->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
     lua_->GetField(-1, "ents");
@@ -686,7 +715,7 @@ class EntityQuery {
     if (!lua_->IsType(entity_index, GarrysMod::Lua::Type::Entity)) {
       return false;
     }
-    lua_->GetField(entity_index, method_name);
+    get_field_protected(entity_index, method_name);
     if (!is_type(-1, "function")) {
       lua_->Pop(1);
       return false;
@@ -807,7 +836,7 @@ class EntityQuery {
                                       double pitch, double yaw,
                                       double roll) {
     try {
-      lua_->GetField(entity_index, method_name);
+      get_field_protected(entity_index, method_name);
       if (!is_type(-1, "function")) {
         lua_->Pop(1);
         return false;
@@ -1046,7 +1075,7 @@ class EntityQuery {
         continue;
       }
 
-      lua_->GetField(entity_index, key.c_str());
+      get_field_protected(entity_index, key.c_str());
       if (is_type(-1, "number")) {
         properties[key] = picojson::value(lua_->GetNumber(-1));
         ++captured;
