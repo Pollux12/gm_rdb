@@ -28,10 +28,7 @@ using GetSpewOutputColorFn = const Color *( * )( );
 
 } // namespace
 
-// tier0's logging-state stack (on x86-64 beta) and spew hook chain (on main x64)
-// retain listener pointers across level transitions, so the registered listener must never be freed.
-// Symbols are resolved dynamically from tier0 so the same win64 binary works on both
-// main branch (classic Spew API) and x86-64 beta (LoggingSystem API).
+// Immortal: tier0 keeps the listener (LoggingSystem) or spew hook (classic Spew API) pointer for the process lifetime.
 class logging_listener_proxy final : public ILoggingListener
 {
 public:
@@ -40,10 +37,7 @@ public:
 		std::lock_guard<std::mutex> lock( m_forward_mutex );
 
 		if( !m_registered )
-		{
-			register_with_tier0( );
-			m_registered = true;
-		}
+			m_registered = register_with_tier0( );
 
 		m_target = adapter;
 	}
@@ -70,36 +64,36 @@ public:
 	}
 
 private:
-	void register_with_tier0( )
+	bool register_with_tier0( )
 	{
 		SourceSDK::ModuleLoader loader( "tier0" );
 		if( !loader.IsValid( ) )
-			return;
+			return false;
 
 		auto register_logging = reinterpret_cast<RegisterLoggingListenerFn>(
 			loader.GetSymbol( "LoggingSystem_RegisterLoggingListener" ) );
 		if( register_logging != nullptr )
 		{
 			register_logging( this );
-			return;
+			return true;
 		}
 
 		auto set_spew = reinterpret_cast<SpewOutputSetterFn>(
 			loader.GetSymbol( "SpewOutputFunc" ) );
 		auto get_spew = reinterpret_cast<GetSpewOutputFuncFn>(
 			loader.GetSymbol( "GetSpewOutputFunc" ) );
+		if( set_spew == nullptr || get_spew == nullptr )
+			return false;
+
 		m_get_spew_group = reinterpret_cast<GetSpewOutputGroupFn>(
 			loader.GetSymbol( "GetSpewOutputGroup" ) );
 		m_get_spew_level = reinterpret_cast<GetSpewOutputLevelFn>(
 			loader.GetSymbol( "GetSpewOutputLevel" ) );
 		m_get_spew_color = reinterpret_cast<GetSpewOutputColorFn>(
 			loader.GetSymbol( "GetSpewOutputColor" ) );
-
-		if( set_spew != nullptr && get_spew != nullptr )
-		{
-			m_original_spew = get_spew( );
-			set_spew( &logging_listener_proxy::SpewCallback );
-		}
+		m_original_spew = get_spew( );
+		set_spew( &logging_listener_proxy::SpewCallback );
+		return true;
 	}
 
 	static SpewRetvalCompat_t SpewCallback( int spewType, const tchar *pMsg );
@@ -109,12 +103,12 @@ private:
 		SpewOutputFuncCompat_t original = m_original_spew;
 		{
 			std::lock_guard<std::mutex> lock( m_forward_mutex );
-			if( m_target != nullptr && pMsg != nullptr )
+			if( m_target != nullptr )
 			{
 				const tchar *group = m_get_spew_group ? m_get_spew_group( ) : nullptr;
-				const int severity = m_get_spew_level ? m_get_spew_level( ) : 0;
+				const int level = m_get_spew_level ? m_get_spew_level( ) : 0;
 				const Color *color = m_get_spew_color ? m_get_spew_color( ) : nullptr;
-				m_target->handle_spew( spewType, group, severity, color, pMsg );
+				m_target->handle_spew( spewType, group, level, color, pMsg );
 			}
 		}
 
@@ -296,39 +290,22 @@ void console_adapter::queue_dispatcher( )
 
 void console_adapter::handle_log( const LoggingContext_t *pContext, const tchar *pMessage )
 {
-	if( m_thread_stop || !m_accept_logs )
-		return;
-
-	if( pContext == nullptr || pMessage == nullptr )
-		return;
-
-	std::unique_lock<std::mutex> lock( m_mutex );
-	if( pContext->m_Flags & LCF_DO_NOT_ECHO )
+	if( pContext == nullptr || ( pContext->m_Flags & LCF_DO_NOT_ECHO ) )
 		return;
 
 	Color color = pContext->m_Color;
 	if( color == UNSPECIFIED_LOGGING_COLOR )
 		color = Color( 255, 255, 255, 255 );
 
-	json::object jcolor;
-	jcolor["r"] = json::value( static_cast<double>( color.r( ) ) );
-	jcolor["g"] = json::value( static_cast<double>( color.g( ) ) );
-	jcolor["b"] = json::value( static_cast<double>( color.b( ) ) );
-	jcolor["a"] = json::value( static_cast<double>( color.a( ) ) );
-
-	json::object param;
-	param["channel_id"] = json::value( static_cast<double>( pContext->m_ChannelID ) );
-	param["severity"] = json::value( static_cast<double>( pContext->m_Severity ) );
-	param["color"] = json::value( jcolor );
-	param["message"] = json::value( pMessage );
-
-	m_messages.emplace_back( std::move( param ) );
-
-	lock.unlock( );
-	m_condition.notify_all( );
+	enqueue_message( pContext->m_ChannelID, nullptr, pContext->m_Severity, color, pMessage );
 }
 
-void console_adapter::handle_spew( int spew_type, const tchar *group, int severity, const Color *output_color, const tchar *pMessage )
+void console_adapter::handle_spew( int spew_type, const tchar *group, int level, const Color *color, const tchar *pMessage )
+{
+	enqueue_message( spew_type, group, level, color ? *color : Color( 255, 255, 255, 255 ), pMessage );
+}
+
+void console_adapter::enqueue_message( int channel_id, const tchar *group, int severity, const Color &color, const tchar *pMessage )
 {
 	if( m_thread_stop || !m_accept_logs )
 		return;
@@ -336,10 +313,6 @@ void console_adapter::handle_spew( int spew_type, const tchar *group, int severi
 	if( pMessage == nullptr )
 		return;
 
-	std::unique_lock<std::mutex> lock( m_mutex );
-
-	const Color color = output_color ? *output_color : Color( 255, 255, 255, 255 );
-
 	json::object jcolor;
 	jcolor["r"] = json::value( static_cast<double>( color.r( ) ) );
 	jcolor["g"] = json::value( static_cast<double>( color.g( ) ) );
@@ -347,12 +320,14 @@ void console_adapter::handle_spew( int spew_type, const tchar *group, int severi
 	jcolor["a"] = json::value( static_cast<double>( color.a( ) ) );
 
 	json::object param;
-	param["channel_id"] = json::value( static_cast<double>( spew_type ) );
-	param["group"] = json::value( group ? group : "" );
+	param["channel_id"] = json::value( static_cast<double>( channel_id ) );
+	if( group != nullptr )
+		param["group"] = json::value( group );
 	param["severity"] = json::value( static_cast<double>( severity ) );
 	param["color"] = json::value( jcolor );
 	param["message"] = json::value( pMessage );
 
+	std::unique_lock<std::mutex> lock( m_mutex );
 	m_messages.emplace_back( std::move( param ) );
 
 	lock.unlock( );
