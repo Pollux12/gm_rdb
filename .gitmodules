@@ -1,6 +1,6 @@
 [submodule "LRDB"]
 	path = LRDB
-	url = https://github.com/danielga/LRDB.git
+	url = https://github.com/Pollux12/LRDB.git
 [submodule "asio"]
 	path = asio
 	url = https://github.com/chriskohlhoff/asio.git
