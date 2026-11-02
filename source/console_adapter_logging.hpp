@@ -43,8 +43,11 @@ public:
 
 	// Called by the immortal logging listener proxy (see console_adapter_logging.cpp)
 	void handle_log( const LoggingContext_t *pContext, const tchar *pMessage );
+	void handle_spew( int spew_type, const tchar *group, int level, const Color *color, const tchar *pMessage );
 
 private:
+	void enqueue_message( int channel_id, const tchar *group, int severity, const Color &color, const tchar *pMessage );
+
 	void start( std::unique_lock<std::mutex> &lock );
 
 	void stop( std::unique_lock<std::mutex> &lock );

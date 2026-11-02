@@ -82,6 +82,16 @@ add_library(garrysmod_lua_shared STATIC EXCLUDE_FROM_ALL
     "${_gmc}/lua_shared/source/LuaShared.cpp")
 add_library(gmod::lua_shared ALIAS garrysmod_lua_shared)
 
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    if(MSVC)
+        target_compile_options(garrysmod_lua_shared PRIVATE
+            "/FI${CMAKE_CURRENT_LIST_DIR}/LuaSharedCompat.hpp")
+    else()
+        target_compile_options(garrysmod_lua_shared PRIVATE
+            "-include" "${CMAKE_CURRENT_LIST_DIR}/LuaSharedCompat.hpp")
+    endif()
+endif()
+
 target_link_libraries(garrysmod_lua_shared gmod::common ${CMAKE_DL_LIBS})
 set_target_properties(garrysmod_lua_shared PROPERTIES FOLDER "garrysmod")
 
