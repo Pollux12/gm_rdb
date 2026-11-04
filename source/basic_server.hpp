@@ -676,9 +676,12 @@ class basic_server {
   }
 
 #ifndef GMOD_CLIENT_MODULE
+  // Calls _GLUALS.<function_name>(args...), which returns ok[, detail].
+  // When ok is true and detail is a string it is handed back in out_result.
   bool invoke_gluals_function(const char* function_name,
                               const std::vector<std::string>& args,
-                              std::string& out_error) {
+                              std::string& out_error,
+                              std::string* out_result = nullptr) {
     if (lua_base_ == nullptr) {
       out_error = "lua interface unavailable";
       return false;
@@ -737,6 +740,15 @@ class basic_server {
       return false;
     }
 
+    if (out_result != nullptr &&
+        lua_base_->IsType(-1, GarrysMod::Lua::Type::String)) {
+      unsigned int length = 0;
+      const char* result = lua_base_->GetString(-1, &length);
+      if (result != nullptr) {
+        out_result->assign(result, length);
+      }
+    }
+
     lua_base_->Pop(2);
     restore_stack();
     return true;
@@ -783,11 +795,45 @@ class basic_server {
       return send_response(response);
     }
 
+    if (chunk.find('\0') != std::string::npos) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "lua chunk contains a null byte", "run_lua",
+                           error_data("request", "lua"));
+      return send_response(response);
+    }
+
+    // "capture" asks the bridge to report return values, printed output and
+    // errors as a JSON result instead of failing the request on a Lua error.
+    bool capture = false;
+    if (params.count("capture") > 0) {
+      if (!params.at("capture").is<bool>()) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "run_lua",
+                             error_data("request", "capture"));
+        return send_response(response);
+      }
+      capture = params.at("capture").get<bool>();
+    }
+
+    std::vector<std::string> bridge_args = {realm, chunk};
+    if (capture) {
+      bridge_args.emplace_back("capture");
+    }
+
     std::string bridge_error;
-    if (!invoke_gluals_function("runLua", {realm, chunk}, bridge_error)) {
+    std::string bridge_result;
+    if (!invoke_gluals_function("runLua", bridge_args, bridge_error,
+                                &bridge_result)) {
       set_structured_error(response, lrdb::response_error::InternalError,
                            "failed to execute lua", "run_lua",
                            error_data("request", "runtime", bridge_error));
+    } else if (!bridge_result.empty()) {
+      // Bridges that report what the chunk did return it as JSON; anything
+      // else is passed through as a plain string.
+      json::value parsed;
+      const std::string parse_error = json::parse(parsed, bridge_result);
+      response.result =
+          parse_error.empty() ? parsed : json::value(bridge_result);
     }
 
     return send_response(response);
