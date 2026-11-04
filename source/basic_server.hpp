@@ -659,6 +659,18 @@ class basic_server {
            starts_with_case_insensitive(command, "lua_openscript_menu");
   }
 
+  static bool is_valid_bridge_mode(const std::string& mode) {
+    if (mode.empty() || mode.size() > 32) {
+      return false;
+    }
+    for (const char ch : mode) {
+      if (!((ch >= 'a' && ch <= 'z') || ch == '_')) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static bool try_parse_realm_value(const json::value& value,
                                     std::string& normalized_realm) {
     if (!value.is<std::string>()) {
@@ -802,22 +814,25 @@ class basic_server {
       return send_response(response);
     }
 
-    // "capture" asks the bridge to report return values, printed output and
-    // errors as a JSON result instead of failing the request on a Lua error.
-    bool capture = false;
-    if (params.count("capture") > 0) {
-      if (!params.at("capture").is<bool>()) {
+    // "mode" is handed to the bridge as a third argument. GLuaLS's MCP tools
+    // use it to get return values, printed output and errors back as JSON, and
+    // to run code on the next server tick, where breakpoints can hit (requests
+    // are handled inside the debug hook, where Lua runs no hooks).
+    std::string mode;
+    if (params.count("mode") > 0) {
+      if (!params.at("mode").is<std::string>() ||
+          !is_valid_bridge_mode(params.at("mode").get<std::string>())) {
         set_structured_error(response, lrdb::response_error::InvalidParams,
                              "invalid params", "run_lua",
-                             error_data("request", "capture"));
+                             error_data("request", "mode"));
         return send_response(response);
       }
-      capture = params.at("capture").get<bool>();
+      mode = params.at("mode").get<std::string>();
     }
 
     std::vector<std::string> bridge_args = {realm, chunk};
-    if (capture) {
-      bridge_args.emplace_back("capture");
+    if (!mode.empty()) {
+      bridge_args.push_back(mode);
     }
 
     std::string bridge_error;

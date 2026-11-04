@@ -26,7 +26,8 @@ Default ports are `21111` for `rdb` and `21112` for `rdb_client`.
 The server module's `run_lua` request runs a chunk through the `_GLUALS.runLua(realm, code)` bridge that the GLuaLS extension installs in `lua/autorun/debug.lua`.
 
 - When the bridge returns `true, detail` and `detail` is a string, the response `result` is that string, parsed as JSON when it is valid JSON.
-- With `"capture": true` the bridge is called as `_GLUALS.runLua(realm, code, "capture")`. It then reports return values, printed output and Lua errors in its JSON result, so a failing chunk still answers with what it printed. GLuaLS's MCP tools use this.
+- With `"mode": "<name>"` (lowercase letters and `_`) the bridge is called as `_GLUALS.runLua(realm, code, mode)`. GLuaLS's MCP tools use modes to get return values, printed output and Lua errors back as JSON, and to run code on the next server tick.
+- Requests are handled inside the Lua debug hook, and LuaJIT runs no hooks there, so code run directly by `run_lua` never stops at breakpoints. Code the bridge schedules for the next tick does.
 - Older bridges ignore the extra argument and return no result.
 
 ## Build
