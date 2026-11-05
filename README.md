@@ -46,6 +46,7 @@ Set `AUTOINSTALL` and `AUTOINSTALL_CLIENT` to copy the built files into a Garry'
 
 ## Notes
 
+- While no debugger is connected, the module keeps the last 2000 console lines and Lua errors and sends them to the next client that connects, so errors from before attaching still show up.
 - Windows and Linux are covered by CI.
 - macOS support is experimental.
 - Keep the historical `.dll` suffix on macOS module names.

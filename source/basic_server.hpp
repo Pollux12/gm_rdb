@@ -12,9 +12,11 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <string>
 #include <thread>
@@ -197,7 +199,10 @@ class basic_server {
       if (has_active_connection_) {
         ++metrics_.connections_closed;
       }
-      has_active_connection_ = false;
+      {
+        std::lock_guard<std::mutex> lock(backlog_mutex_);
+        has_active_connection_ = false;
+      }
       wait_for_connect_ = true;
       debugger_.unpause();
     };
@@ -217,11 +222,18 @@ class basic_server {
     wait_for_connect_ = false;
     wait_for_initial_pause_connection_ = false;
     pending_pause_on_error_.store(false);
-    has_active_connection_ = true;
+    std::deque<std::string> backlog;
+    {
+      std::lock_guard<std::mutex> lock(backlog_mutex_);
+      has_active_connection_ = true;
+      backlog.swap(backlog_);
+    }
     ++metrics_.connections_opened;
     json::object param;
     param["protocol_version"] = json::value(LRDB_SERVER_PROTOCOL_VERSION);
     param["module_version"] = json::value(GM_RDB_VERSION);
+    // Console lines and errors kept while no client was connected; they follow this message.
+    param["backlog"] = json::value(static_cast<double>(backlog.size()));
 
     json::object lua;
     lua["version"] = json::value(LUA_VERSION);
@@ -230,6 +242,9 @@ class basic_server {
 
     param["lua"] = json::value(lua);
     send_notify(lrdb::notify_message("connected", json::value(param)));
+    for (const std::string& message : backlog) {
+      send_message(message);
+    }
 
     // If the debugger is already paused when a client connects, re-announce
     // the paused state so the adapter can correctly show pause UI.
@@ -1816,11 +1831,37 @@ class basic_server {
     param["fingerprint"] = json::value(fingerprint);
     param["count"] = json::value(static_cast<double>(count));
     param["source"] = json::value("lua");
-    send_notify(lrdb::notify_message("error", json::value(param)));
+    param["timestamp"] = json::value(now_ms());
+    send_or_backlog(lrdb::notify_message("error", json::value(param)));
+  }
+
+  static double now_ms() {
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+  }
+
+  /// Sends a notification, or keeps it for the next client while none is connected,
+  /// so a debugger that attaches later still sees what the server printed before.
+  bool send_or_backlog(const lrdb::notify_message& message) {
+    {
+      std::lock_guard<std::mutex> lock(backlog_mutex_);
+      if (!has_active_connection_) {
+        backlog_.push_back(lrdb::message::serialize(message));
+        while (backlog_.size() > kBacklogLimit) {
+          backlog_.pop_front();
+        }
+        return false;
+      }
+    }
+    return send_notify(message);
   }
 
   void handle_console_output(const json::value& message) {
-    send_output(message);
+    json::value stamped = message;
+    if (stamped.is<json::object>()) {
+      stamped.get<json::object>()["timestamp"] = json::value(now_ms());
+    }
+    send_or_backlog(lrdb::notify_message("output", stamped));
 
     std::string lua_error;
     if (!try_extract_lua_error_message(message, lua_error)) {
@@ -2141,6 +2182,9 @@ class basic_server {
   bool attached_;
   bool disposed_;
   bool has_active_connection_;
+  std::mutex backlog_mutex_;
+  std::deque<std::string> backlog_;
+  static constexpr size_t kBacklogLimit = 2000;
   std::atomic_bool pending_pause_on_error_;
   bool stop_on_error_;
   bool pause_on_activate_;
