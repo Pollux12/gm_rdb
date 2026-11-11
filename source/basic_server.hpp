@@ -12,9 +12,11 @@
 #include <cstdint>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <regex>
 #include <string>
 #include <thread>
@@ -197,7 +199,10 @@ class basic_server {
       if (has_active_connection_) {
         ++metrics_.connections_closed;
       }
-      has_active_connection_ = false;
+      {
+        std::lock_guard<std::mutex> lock(backlog_mutex_);
+        has_active_connection_ = false;
+      }
       wait_for_connect_ = true;
       debugger_.unpause();
     };
@@ -217,11 +222,18 @@ class basic_server {
     wait_for_connect_ = false;
     wait_for_initial_pause_connection_ = false;
     pending_pause_on_error_.store(false);
-    has_active_connection_ = true;
+    std::deque<std::string> backlog;
+    {
+      std::lock_guard<std::mutex> lock(backlog_mutex_);
+      has_active_connection_ = true;
+      backlog.swap(backlog_);
+    }
     ++metrics_.connections_opened;
     json::object param;
     param["protocol_version"] = json::value(LRDB_SERVER_PROTOCOL_VERSION);
     param["module_version"] = json::value(GM_RDB_VERSION);
+    // Console lines and errors kept while no client was connected; they follow this message.
+    param["backlog"] = json::value(static_cast<double>(backlog.size()));
 
     json::object lua;
     lua["version"] = json::value(LUA_VERSION);
@@ -230,6 +242,9 @@ class basic_server {
 
     param["lua"] = json::value(lua);
     send_notify(lrdb::notify_message("connected", json::value(param)));
+    for (const std::string& message : backlog) {
+      send_message(message);
+    }
 
     // If the debugger is already paused when a client connects, re-announce
     // the paused state so the adapter can correctly show pause UI.
@@ -659,6 +674,18 @@ class basic_server {
            starts_with_case_insensitive(command, "lua_openscript_menu");
   }
 
+  static bool is_valid_bridge_mode(const std::string& mode) {
+    if (mode.empty() || mode.size() > 32) {
+      return false;
+    }
+    for (const char ch : mode) {
+      if (!((ch >= 'a' && ch <= 'z') || ch == '_')) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static bool try_parse_realm_value(const json::value& value,
                                     std::string& normalized_realm) {
     if (!value.is<std::string>()) {
@@ -676,9 +703,12 @@ class basic_server {
   }
 
 #ifndef GMOD_CLIENT_MODULE
+  // Calls _GLUALS.<function_name>(args...), which returns ok[, detail].
+  // When ok is true and detail is a string it is handed back in out_result.
   bool invoke_gluals_function(const char* function_name,
                               const std::vector<std::string>& args,
-                              std::string& out_error) {
+                              std::string& out_error,
+                              std::string* out_result = nullptr) {
     if (lua_base_ == nullptr) {
       out_error = "lua interface unavailable";
       return false;
@@ -737,6 +767,15 @@ class basic_server {
       return false;
     }
 
+    if (out_result != nullptr &&
+        lua_base_->IsType(-1, GarrysMod::Lua::Type::String)) {
+      unsigned int length = 0;
+      const char* result = lua_base_->GetString(-1, &length);
+      if (result != nullptr) {
+        out_result->assign(result, length);
+      }
+    }
+
     lua_base_->Pop(2);
     restore_stack();
     return true;
@@ -783,11 +822,48 @@ class basic_server {
       return send_response(response);
     }
 
+    if (chunk.find('\0') != std::string::npos) {
+      set_structured_error(response, lrdb::response_error::InvalidParams,
+                           "lua chunk contains a null byte", "run_lua",
+                           error_data("request", "lua"));
+      return send_response(response);
+    }
+
+    // "mode" is handed to the bridge as a third argument. GLuaLS's MCP tools
+    // use it to get return values, printed output and errors back as JSON, and
+    // to run code on the next server tick, where breakpoints can hit (requests
+    // are handled inside the debug hook, where Lua runs no hooks).
+    std::string mode;
+    if (params.count("mode") > 0) {
+      if (!params.at("mode").is<std::string>() ||
+          !is_valid_bridge_mode(params.at("mode").get<std::string>())) {
+        set_structured_error(response, lrdb::response_error::InvalidParams,
+                             "invalid params", "run_lua",
+                             error_data("request", "mode"));
+        return send_response(response);
+      }
+      mode = params.at("mode").get<std::string>();
+    }
+
+    std::vector<std::string> bridge_args = {realm, chunk};
+    if (!mode.empty()) {
+      bridge_args.push_back(mode);
+    }
+
     std::string bridge_error;
-    if (!invoke_gluals_function("runLua", {realm, chunk}, bridge_error)) {
+    std::string bridge_result;
+    if (!invoke_gluals_function("runLua", bridge_args, bridge_error,
+                                &bridge_result)) {
       set_structured_error(response, lrdb::response_error::InternalError,
                            "failed to execute lua", "run_lua",
                            error_data("request", "runtime", bridge_error));
+    } else if (!bridge_result.empty()) {
+      // Bridges that report what the chunk did return it as JSON; anything
+      // else is passed through as a plain string.
+      json::value parsed;
+      const std::string parse_error = json::parse(parsed, bridge_result);
+      response.result =
+          parse_error.empty() ? parsed : json::value(bridge_result);
     }
 
     return send_response(response);
@@ -1755,11 +1831,37 @@ class basic_server {
     param["fingerprint"] = json::value(fingerprint);
     param["count"] = json::value(static_cast<double>(count));
     param["source"] = json::value("lua");
-    send_notify(lrdb::notify_message("error", json::value(param)));
+    param["timestamp"] = json::value(now_ms());
+    send_or_backlog(lrdb::notify_message("error", json::value(param)));
+  }
+
+  static double now_ms() {
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+  }
+
+  /// Sends a notification, or keeps it for the next client while none is connected,
+  /// so a debugger that attaches later still sees what the server printed before.
+  bool send_or_backlog(const lrdb::notify_message& message) {
+    {
+      std::lock_guard<std::mutex> lock(backlog_mutex_);
+      if (!has_active_connection_) {
+        backlog_.push_back(lrdb::message::serialize(message));
+        while (backlog_.size() > kBacklogLimit) {
+          backlog_.pop_front();
+        }
+        return false;
+      }
+    }
+    return send_notify(message);
   }
 
   void handle_console_output(const json::value& message) {
-    send_output(message);
+    json::value stamped = message;
+    if (stamped.is<json::object>()) {
+      stamped.get<json::object>()["timestamp"] = json::value(now_ms());
+    }
+    send_or_backlog(lrdb::notify_message("output", stamped));
 
     std::string lua_error;
     if (!try_extract_lua_error_message(message, lua_error)) {
@@ -2080,6 +2182,9 @@ class basic_server {
   bool attached_;
   bool disposed_;
   bool has_active_connection_;
+  std::mutex backlog_mutex_;
+  std::deque<std::string> backlog_;
+  static constexpr size_t kBacklogLimit = 2000;
   std::atomic_bool pending_pause_on_error_;
   bool stop_on_error_;
   bool pause_on_activate_;
